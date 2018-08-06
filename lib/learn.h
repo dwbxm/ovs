@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2011, 2012, 2013, 2014, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,8 @@ struct match;
 struct ofpbuf;
 struct ofpact_learn;
 struct ofputil_flow_mod;
+struct ofputil_port_map;
+struct ofputil_table_map;
 struct nx_action_learn;
 
 /* NXAST_LEARN helper functions.
@@ -39,7 +41,11 @@ void learn_execute(const struct ofpact_learn *, const struct flow *,
                    struct ofputil_flow_mod *, struct ofpbuf *ofpacts);
 void learn_mask(const struct ofpact_learn *, struct flow_wildcards *);
 
-char *learn_parse(char *, struct ofpbuf *ofpacts) OVS_WARN_UNUSED_RESULT;
-void learn_format(const struct ofpact_learn *, struct ds *);
+char *learn_parse(char *, const struct ofputil_port_map *,
+                  const struct ofputil_table_map *, struct ofpbuf *ofpacts)
+    OVS_WARN_UNUSED_RESULT;
+void learn_format(const struct ofpact_learn *,
+                  const struct ofputil_port_map *,
+                  const struct ofputil_table_map *, struct ds *);
 
 #endif /* learn.h */

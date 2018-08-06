@@ -38,8 +38,6 @@ described in :doc:`/intro/install/general`. You do not need to install Open
 vSwitch or to build or load the kernel module to run these test suites. You do
 not need supervisor privilege to run these test suites.
 
-.. _testing-unit-tests:
-
 Unit Tests
 ~~~~~~~~~~
 
@@ -62,7 +60,7 @@ To run all the unit tests in Open vSwitch in parallel, run::
 You can run up to eight threads. This takes under a minute on a modern 4-core
 desktop system.
 
-To see a list of all the available tests, run:
+To see a list of all the available tests, run::
 
     $ make check TESTSUITEFLAGS=--list
 
@@ -103,9 +101,9 @@ using the ``check-lcov`` target::
 
     $ make check-lcov
 
-All the same options are avaiable via TESTSUITEFLAGS. For example::
+All the same options are available via TESTSUITEFLAGS. For example::
 
-    $ make check-lcov TESTSUITEFLAGS=-j8 -k ovn
+    $ make check-lcov TESTSUITEFLAGS='-j8 -k ovn'
 
 .. _testing-valgrind:
 
@@ -120,13 +118,15 @@ valgrind by using the ``check-valgrind`` target::
 When you do this, the "valgrind" results for test ``<N>`` are reported in files
 named ``tests/testsuite.dir/<N>/valgrind.*``.
 
+To test the testsuite of kernel datapath under valgrind, you can use the
+``check-kernel-valgrind`` target and find the "valgrind" results under
+directory ``tests/system-kmod-testsuite.dir/``.
+
 All the same options are available via TESTSUITEFLAGS.
 
 .. hint::
   You may find that the valgrind results are easier to interpret if you put
   ``-q`` in ``~/.valgrindrc``, since that reduces the amount of output.
-
-.. _testing-oftest:
 
 OFTest
 ~~~~~~
@@ -181,14 +181,12 @@ standard and other standards.
   of Open vSwitch and OFTest in your bug report, plus any other information
   needed to reproduce the problem.
 
-.. _ryu:
-
 Ryu
 ~~~
 
 Ryu is an OpenFlow controller written in Python that includes an extensive
 OpenFlow testsuite. Open vSwitch includes a Makefile target to run Ryu in
-"dummy mode". See :ref:`testing-oftest` above for an explanation of dummy mode.
+"dummy mode". See `OFTest`_ above for an explanation of dummy mode.
 
 To run Ryu tests with Open vSwitch, first read and follow the instructions
 under **Testing** above. Second, obtain a copy of Ryu, install its
@@ -198,7 +196,7 @@ do not get installed, so it does not help).
 To run Ryu tests, run the following command from your Open vSwitch build
 directory::
 
-    $ make check-ryu RYUDIR=<ryu-source-dir>``
+    $ make check-ryu RYUDIR=<ryu-source-dir>
 
 where ``<ryu-source-dir>`` is the absolute path to the root of the Ryu source
 distribution. The default ``<ryu-source-dir>`` is ``$srcdir/../ryu``
@@ -237,8 +235,9 @@ Vagrant
   Requires Vagrant (version 1.7.0 or later) and a compatible hypervisor
 
 .. note::
-  You must **Bootstrap** and **Configure** the sources before you run the steps
-  described here.
+  You must bootstrap and configure the sources (see
+  doc:`/intro/install/general`) before you run the steps described
+  here.
 
 A Vagrantfile is provided allowing to compile and provision the source tree as
 found locally in a virtual machine using the following command::
@@ -285,8 +284,9 @@ Native
 ++++++
 
 The datapath testsuite as invoked by Vagrant above may also be run manually on
-a Linux system with root privileges. These tests may take several minutes to
-complete, and cannot be run in parallel.
+a Linux system with root privileges. Make sure, no other Open vSwitch instance
+is running on the test suite. These tests may take several minutes to complete,
+and cannot be run in parallel.
 
 Userspace datapath
 '''''''''''''''''''
@@ -295,7 +295,30 @@ To invoke the datapath testsuite with the userspace datapath, run::
 
     $ make check-system-userspace
 
-The results of the testsuite are in ``tests/system-userspace-traffic.dir``.
+The results of the testsuite are in ``tests/system-userspace-testsuite.dir``.
+
+DPDK datapath
+'''''''''''''
+
+To test :doc:`/intro/install/dpdk` (i.e., the build was configured with
+``--with-dpdk``, the DPDK is installed), run the testsuite and generate
+a report by using the ``check-dpdk`` target::
+
+    # make check-dpdk
+
+or if you are not a root, but a sudo user::
+
+    $ sudo -E make check-dpdk
+
+To see a list of all the available tests, run::
+
+    # make check-dpdk TESTSUITEFLAGS=--list
+
+These tests require a `DPDK supported NIC`_ and proper DPDK variables
+(``DPDK_DIR`` and ``DPDK_BUILD``). Moreover you need to have root privileges,
+load the required modules and bind the NIC to the DPDK-compatible driver.
+
+.. _DPDK supported NIC: http://dpdk.org/doc/nics
 
 Kernel datapath
 '''''''''''''''
@@ -315,7 +338,7 @@ testsuite against that kernel module::
 
     $ make check-kmod
 
-The results of the testsuite are in ``tests/system-kmod-traffic.dir``.
+The results of the testsuite are in ``tests/system-kmod-testsuite.dir``.
 
 .. _testing-static-analysis:
 
@@ -340,8 +363,6 @@ Open vSwitch includes a Makefile target to trigger static code analysis::
 You should invoke scan-view to view analysis results. The last line of output
 from ``clang-analyze`` will list the command (containing results directory)
 that you should invoke to view the results on a browser.
-
-.. _testing-ci:
 
 Continuous Integration with Travis CI
 -------------------------------------
@@ -383,8 +404,6 @@ Instructions to setup travis-ci for your GitHub repository:
 4. Pushing a commit to the repository which breaks the build or the
    testsuite will now trigger a email sent to mylist@mydomain.org
 
-.. _testing-vsperf:
-
 vsperf
 ------
 
@@ -393,3 +412,60 @@ validate the suitability of different vSwitch implementations in a telco
 deployment environment. More information can be found on the `OPNFV wiki`_.
 
 .. _OPNFV wiki: https://wiki.opnfv.org/display/vsperf/VSperf+Home
+
+Proof of Concepts
+~~~~~~~~~~~~~~~~~
+
+Proof of Concepts are documentation materialized into Ansible recipes
+executed in VirtualBox or Libvirt environments orchastrated by Vagrant.
+Proof of Concepts allow developers to create small virtualized setups that
+demonstrate how certain Open vSwitch features are intended to work avoiding
+user introduced errors by overlooking instructions.  Proof of Concepts
+are also helpful when integrating with thirdparty software, because standard
+unit tests with make check are limited.
+
+Vagrant by default uses VirtualBox provider.  However, if Libvirt is your
+choice of virtualization technology, then you can use it by installing Libvirt
+plugin::
+
+    $ vagrant plugin install vagrant-libvirt
+
+And then appending ``--provider=libvirt`` flag to vagrant commands.
+
+The host where Vagrant runs does not need to have any special software
+installed besides vagrant, virtualbox (or libvirt and libvirt-dev) and
+ansible.
+
+The following Proof of Concepts are supported:
+
+Builders
+++++++++
+
+This particular Proof of Concept demonstrates integration with Debian and RPM
+packaging tools::
+
+    $ cd ./poc/builders
+    $ vagrant up
+
+Once that command finished you can get packages from ``/var/www/html``
+directory.  Since those hosts are also configured as repositories then
+you can add them to ``/etc/apt/sources.list.d`` or ``/etc/yum.repos.d``
+configuration files on another host to retrieve packages with yum or
+apt-get.
+
+When you have made changes to OVS source code and want to rebuild packages
+run::
+
+    $ git commit -a
+    $ vagrant rsync && vagrant provision
+
+Whenever packages are rebuilt the Open vSwitch release number increases
+by one and you can simply upgrade Open vSwitch by running ``yum`` or
+``apt-get`` update commands.
+
+Once you are done with experimenting you can tear down setup with::
+
+    $ vagrant destroy
+
+Sometimes deployment of Proof of Concept may fail, if, for example, VMs
+don't have network reachability to the Internet.

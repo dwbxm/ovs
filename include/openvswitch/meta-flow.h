@@ -25,11 +25,17 @@
 #include <netinet/ip6.h>
 #include "openvswitch/flow.h"
 #include "openvswitch/ofp-errors.h"
+#include "openvswitch/ofp-protocol.h"
 #include "openvswitch/packets.h"
 #include "openvswitch/util.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct ds;
 struct match;
+struct ofputil_port_map;
 struct ofputil_tlv_table_mod;
 
 /* Open vSwitch fields
@@ -132,6 +138,11 @@ struct ofputil_tlv_table_mod;
  *
  *       TCP flags: See the description of tcp_flags in ovs-ofctl(8).
  *
+ *       packet type: A pair of packet type namespace NS and NS_TYPE within
+ *       that namespace "(NS,NS_TYPE)". NS and NS_TYPE are formatted in
+ *       decimal or hexadecimal as and accept decimal and hexadecimal (with
+ *       0x prefix) at parsing.
+ *
  *   Prerequisites:
  *
  *     The field's prerequisites.  The values should be straightfoward.
@@ -228,7 +239,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Prerequisites: none.
      * Access: read-only.
      * NXM: NXM_NX_DP_HASH(35) since v2.2.
-     * OXM: NXOXM_ET_DP_HASH(0) since OF1.5 and v2.4.
+     * OXM: NXOXM_ET_DP_HASH(0) since v2.4.
      */
     MFF_DP_HASH,
 
@@ -246,6 +257,20 @@ enum OVS_PACKED_ENUM mf_field_id {
      * OXM: none.
      */
     MFF_RECIRC_ID,
+
+    /* "packet_type".
+     *
+     * Define the packet type in OpenFlow 1.5+.
+     *
+     * Type: be32.
+     * Maskable: no.
+     * Formatting: packet type.
+     * Prerequisites: none.
+     * Access: read-only.
+     * NXM: none.
+     * OXM: OXM_OF_PACKET_TYPE(44) since OF1.5 and v2.8.
+     */
+    MFF_PACKET_TYPE,
 
     /* "conj_id".
      *
@@ -424,6 +449,62 @@ enum OVS_PACKED_ENUM mf_field_id {
      * OXM: none.
      */
     MFF_TUN_GBP_FLAGS,
+
+    /* "tun_erspan_idx".
+     *
+     * ERSPAN index (direction/port number)
+     *
+     * Type: be32 (low 20 bits).
+     * Maskable: bitwise.
+     * Formatting: hexadecimal.
+     * Prerequisites: none.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: NXOXM_ET_ERSPAN_IDX(11) since v2.10.
+     */
+    MFF_TUN_ERSPAN_IDX,
+
+    /* "tun_erspan_ver".
+     *
+     * ERSPAN version (v1 / v2)
+     *
+     * Type: u8 (low 4 bits).
+     * Maskable: bitwise.
+     * Formatting: decimal.
+     * Prerequisites: none.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: NXOXM_ET_ERSPAN_VER(12) since v2.10.
+     */
+    MFF_TUN_ERSPAN_VER,
+
+    /* "tun_erspan_dir".
+     *
+     * ERSPAN mirrored traffic's direction
+     *
+     * Type: u8 (low 1 bits).
+     * Maskable: bitwise.
+     * Formatting: decimal.
+     * Prerequisites: none.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: NXOXM_ET_ERSPAN_DIR(13) since v2.10.
+     */
+    MFF_TUN_ERSPAN_DIR,
+
+    /* "tun_erspan_hwid".
+     *
+     * ERSPAN Hardware ID
+     *
+     * Type: u8 (low 6 bits).
+     * Maskable: bitwise.
+     * Formatting: hexadecimal.
+     * Prerequisites: none.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: NXOXM_ET_ERSPAN_HWID(14) since v2.10.
+     */
+    MFF_TUN_ERSPAN_HWID,
 
 #if TUN_METADATA_NUM_OPTS == 64
     /* "tun_metadata<N>".
@@ -772,7 +853,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: be32.
      * Maskable: bitwise.
      * Formatting: IPv4.
-     * Prerequisites: CTv4.
+     * Prerequisites: CT.
      * Access: read-only.
      * NXM: NXM_NX_CT_NW_SRC(120) since v2.8.
      * OXM: none.
@@ -791,7 +872,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: be32.
      * Maskable: bitwise.
      * Formatting: IPv4.
-     * Prerequisites: CTv4.
+     * Prerequisites: CT.
      * Access: read-only.
      * NXM: NXM_NX_CT_NW_DST(121) since v2.8.
      * OXM: none.
@@ -810,7 +891,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: be128.
      * Maskable: bitwise.
      * Formatting: IPv6.
-     * Prerequisites: CTv6.
+     * Prerequisites: CT.
      * Access: read-only.
      * NXM: NXM_NX_CT_IPV6_SRC(122) since v2.8.
      * OXM: none.
@@ -829,7 +910,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: be128.
      * Maskable: bitwise.
      * Formatting: IPv6.
-     * Prerequisites: CTv6.
+     * Prerequisites: CT.
      * Access: read-only.
      * NXM: NXM_NX_CT_IPV6_DST(123) since v2.8.
      * OXM: none.
@@ -985,7 +1066,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: MAC.
      * Maskable: bitwise.
      * Formatting: Ethernet.
-     * Prerequisites: none.
+     * Prerequisites: Ethernet.
      * Access: read/write.
      * NXM: NXM_OF_ETH_SRC(2) since v1.1.
      * OXM: OXM_OF_ETH_SRC(4) since OF1.2 and v1.7.
@@ -1001,7 +1082,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: MAC.
      * Maskable: bitwise.
      * Formatting: Ethernet.
-     * Prerequisites: none.
+     * Prerequisites: Ethernet.
      * Access: read/write.
      * NXM: NXM_OF_ETH_DST(1) since v1.1.
      * OXM: OXM_OF_ETH_DST(3) since OF1.2 and v1.7.
@@ -1020,7 +1101,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: be16.
      * Maskable: no.
      * Formatting: hexadecimal.
-     * Prerequisites: none.
+     * Prerequisites: Ethernet.
      * Access: read-only.
      * NXM: NXM_OF_ETH_TYPE(3) since v1.1.
      * OXM: OXM_OF_ETH_TYPE(5) since OF1.2 and v1.7.
@@ -1050,7 +1131,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: be16.
      * Maskable: bitwise.
      * Formatting: hexadecimal.
-     * Prerequisites: none.
+     * Prerequisites: Ethernet.
      * Access: read/write.
      * NXM: NXM_OF_VLAN_TCI(4) since v1.1.
      * OXM: none.
@@ -1066,7 +1147,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: be16 (low 12 bits).
      * Maskable: no.
      * Formatting: decimal.
-     * Prerequisites: none.
+     * Prerequisites: Ethernet.
      * Access: read/write.
      * NXM: none.
      * OXM: none.
@@ -1084,7 +1165,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: be16 (low 12 bits).
      * Maskable: bitwise.
      * Formatting: decimal.
-     * Prerequisites: none.
+     * Prerequisites: Ethernet.
      * Access: read/write.
      * NXM: none.
      * OXM: OXM_OF_VLAN_VID(6) since OF1.2 and v1.7.
@@ -1100,7 +1181,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      * Type: u8 (low 3 bits).
      * Maskable: no.
      * Formatting: decimal.
-     * Prerequisites: none.
+     * Prerequisites: Ethernet.
      * Access: read/write.
      * NXM: none.
      * OXM: none.
@@ -1715,6 +1796,114 @@ enum OVS_PACKED_ENUM mf_field_id {
      */
     MFF_ND_TLL,
 
+/* ## ---- ## */
+/* ## NSH  ## */
+/* ## ---- ## */
+
+    /* "nsh_flags".
+     *
+     * flags field in NSH base header.
+     *
+     * Type: u8.
+     * Maskable: bitwise.
+     * Formatting: decimal.
+     * Prerequisites: NSH.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: NXOXM_NSH_FLAGS(1) since v2.8.
+     */
+    MFF_NSH_FLAGS,
+
+    /* "nsh_mdtype".
+     *
+     * mdtype field in NSH base header.
+     *
+     * Type: u8.
+     * Maskable: no.
+     * Formatting: decimal.
+     * Prerequisites: NSH.
+     * Access: read-only.
+     * NXM: none.
+     * OXM: NXOXM_NSH_MDTYPE(2) since v2.8.
+     */
+    MFF_NSH_MDTYPE,
+
+    /* "nsh_np".
+     *
+     * np (next protocol) field in NSH base header.
+     *
+     * Type: u8.
+     * Maskable: no.
+     * Formatting: decimal.
+     * Prerequisites: NSH.
+     * Access: read-only.
+     * NXM: none.
+     * OXM: NXOXM_NSH_NP(3) since v2.8.
+     */
+    MFF_NSH_NP,
+
+    /* "nsh_spi" (aka "nsp").
+     *
+     * spi (service path identifier) field in NSH base header.
+     *
+     * Type: be32 (low 24 bits).
+     * Maskable: no.
+     * Formatting: hexadecimal.
+     * Prerequisites: NSH.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: NXOXM_NSH_SPI(4) since v2.8.
+     */
+    MFF_NSH_SPI,
+
+    /* "nsh_si" (aka "nsi").
+     *
+     * si (service index) field in NSH base header.
+     *
+     * Type: u8.
+     * Maskable: no.
+     * Formatting: decimal.
+     * Prerequisites: NSH.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: NXOXM_NSH_SI(5) since v2.8.
+     */
+    MFF_NSH_SI,
+
+    /* "nsh_c<N>" (aka "nshc<N>").
+     *
+     * context fields in NSH context header.
+     *
+     * Type: be32.
+     * Maskable: bitwise.
+     * Formatting: hexadecimal.
+     * Prerequisites: NSH.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: NXOXM_NSH_C1(6) since v2.8.        <1>
+     * OXM: NXOXM_NSH_C2(7) since v2.8.        <2>
+     * OXM: NXOXM_NSH_C3(8) since v2.8.        <3>
+     * OXM: NXOXM_NSH_C4(9) since v2.8.        <4>
+     */
+    MFF_NSH_C1,
+    MFF_NSH_C2,
+    MFF_NSH_C3,
+    MFF_NSH_C4,
+
+    /* "nsh_ttl".
+     *
+     * TTL field in NSH base header.
+     *
+     * Type: u8.
+     * Maskable: no.
+     * Formatting: decimal.
+     * Prerequisites: NSH.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: NXOXM_NSH_TTL(10) since v2.9.
+     */
+    MFF_NSH_TTL,
+
     MFF_N_IDS
 };
 
@@ -1808,11 +1997,13 @@ enum OVS_PACKED_ENUM mf_prereqs {
     MFP_NONE,
 
     /* L2 requirements. */
+    MFP_ETHERNET,
     MFP_ARP,
     MFP_VLAN_VID,
     MFP_IPV4,
     MFP_IPV6,
     MFP_IP_ANY,
+    MFP_NSH,
 
     /* L2.5 requirements. */
     MFP_MPLS,
@@ -1824,8 +2015,6 @@ enum OVS_PACKED_ENUM mf_prereqs {
     MFP_ICMPV4,
     MFP_ICMPV6,
     MFP_CT_VALID,               /* Implies IPv4 or IPv6. */
-    MFP_CTV4_VALID,             /* MFP_CT_VALID and IPv4. */
-    MFP_CTV6_VALID,             /* MFP_CT_VALID and IPv6. */
 
     /* L2+L3+L4 requirements. */
     MFP_ND,
@@ -1860,6 +2049,7 @@ enum OVS_PACKED_ENUM mf_string {
     MFS_FRAG,                   /* no, yes, first, later, not_later */
     MFS_TNL_FLAGS,              /* FLOW_TNL_F_* flags */
     MFS_TCP_FLAGS,              /* TCP_* flags */
+    MFS_PACKET_TYPE,            /* "(NS,NS_TYPE)" */
 };
 
 struct mf_field {
@@ -1898,14 +2088,10 @@ struct mf_field {
      * the OpenFlow protocol version the field was introduced in.
      * Also, some field types are tranparently mapped to each other via the
      * struct flow (like vlan and dscp/tos fields), so each variant supports
-     * all protocols.
-     *
-     * These are combinations of OFPUTIL_P_*.  (They are not declared as type
-     * enum ofputil_protocol because that would give meta-flow.h and ofp-util.h
-     * a circular dependency.) */
-    uint32_t usable_protocols_exact;   /* Matching or setting whole field. */
-    uint32_t usable_protocols_cidr;    /* Matching a CIDR mask in field. */
-    uint32_t usable_protocols_bitwise; /* Matching arbitrary bits in field. */
+     * all protocols. */
+    enum ofputil_protocol usable_protocols_exact; /* Match/set whole field. */
+    enum ofputil_protocol usable_protocols_cidr;    /* Match CIDR mask. */
+    enum ofputil_protocol usable_protocols_bitwise; /* Match arbitrary bits. */
 
     int flow_be32ofs;  /* Field's be32 offset in "struct flow", if prefix tree
                         * lookup is supported for the field, or -1. */
@@ -2057,6 +2243,7 @@ void mf_set_flow_value_masked(const struct mf_field *,
                               const union mf_value *mask,
                               struct flow *);
 bool mf_is_tun_metadata(const struct mf_field *);
+bool mf_is_pipeline_field(const struct mf_field *);
 bool mf_is_set(const struct mf_field *, const struct flow *);
 void mf_mask_field(const struct mf_field *, struct flow_wildcards *);
 void mf_mask_field_masked(const struct mf_field *, const union mf_value *mask,
@@ -2102,14 +2289,22 @@ enum ofperr mf_check_dst(const struct mf_subfield *, const struct match *);
 
 /* Parsing and formatting. */
 char *mf_parse(const struct mf_field *, const char *,
+               const struct ofputil_port_map *,
                union mf_value *value, union mf_value *mask);
-char *mf_parse_value(const struct mf_field *, const char *, union mf_value *);
+char *mf_parse_value(const struct mf_field *, const char *,
+                     const struct ofputil_port_map *, union mf_value *);
 void mf_format(const struct mf_field *,
                const union mf_value *value, const union mf_value *mask,
+               const struct ofputil_port_map *,
                struct ds *);
 void mf_format_subvalue(const union mf_subvalue *subvalue, struct ds *s);
 
 /* Field Arrays. */
 void field_array_set(enum mf_field_id id, const union mf_value *,
                      struct field_array *);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* meta-flow.h */

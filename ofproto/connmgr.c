@@ -28,15 +28,16 @@
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/ofp-actions.h"
 #include "openvswitch/ofp-msgs.h"
-#include "openvswitch/ofp-util.h"
+#include "openvswitch/ofp-monitor.h"
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vconn.h"
 #include "openvswitch/vlog.h"
 #include "ovs-atomic.h"
 #include "pinsched.h"
-#include "poll-loop.h"
-#include "rconn.h"
+#include "openvswitch/poll-loop.h"
+#include "openvswitch/rconn.h"
 #include "openvswitch/shash.h"
+#include "sat-math.h"
 #include "simap.h"
 #include "stream.h"
 #include "timeval.h"
@@ -73,7 +74,7 @@ struct ofconn {
     /* OpenFlow state. */
     enum ofp12_controller_role role;           /* Role. */
     enum ofputil_protocol protocol; /* Current protocol variant. */
-    enum nx_packet_in_format packet_in_format; /* OFPT_PACKET_IN format. */
+    enum ofputil_packet_in_format packet_in_format;
 
     /* OFPT_PACKET_IN related data. */
     struct rconn_packet_counter *packet_in_counter; /* # queued on 'rconn'. */
@@ -138,10 +139,11 @@ struct ofconn {
 
 /* vswitchd/ovs-vswitchd.8.in documents the value of BUNDLE_IDLE_LIFETIME in
  * seconds.  That documentation must be kept in sync with the value below. */
-enum {
-    BUNDLE_EXPIRY_INTERVAL = 1000,  /* Check bundle expiry every 1 sec. */
-    BUNDLE_IDLE_TIMEOUT = 10000,    /* Expire idle bundles after 10 seconds. */
-};
+#define BUNDLE_EXPIRY_INTERVAL 1000     /* Check bundle expiry every 1 sec. */
+#define BUNDLE_IDLE_TIMEOUT_DEFAULT 10000   /* Expire idle bundles after
+                                             * 10 seconds. */
+
+static unsigned int bundle_idle_timeout = BUNDLE_IDLE_TIMEOUT_DEFAULT;
 
 static struct ofconn *ofconn_create(struct connmgr *, struct rconn *,
                                     enum ofconn_type, bool enable_async_msgs)
@@ -469,6 +471,18 @@ ofconn_get_ofproto(const struct ofconn *ofconn)
 {
     return ofconn->connmgr->ofproto;
 }
+
+/* Sets the bundle idle timeout to 'timeout' seconds, interpreting 0 as
+ * requesting the default timeout.
+ *
+ * The OpenFlow spec mandates the timeout to be at least one second; . */
+void
+connmgr_set_bundle_idle_timeout(unsigned timeout)
+{
+    bundle_idle_timeout = (timeout
+                           ? sat_mul(timeout, 1000)
+                           : BUNDLE_IDLE_TIMEOUT_DEFAULT);
+}
 
 /* OpenFlow configuration. */
 
@@ -791,12 +805,12 @@ update_in_band_remotes(struct connmgr *mgr)
         if (!mgr->in_band) {
             in_band_create(mgr->ofproto, mgr->local_port_name, &mgr->in_band);
         }
-        in_band_set_queue(mgr->in_band, mgr->in_band_queue);
     } else {
         /* in_band_run() needs a chance to delete any existing in-band flows.
          * We will destroy mgr->in_band after it's done with that. */
     }
     if (mgr->in_band) {
+        in_band_set_queue(mgr->in_band, mgr->in_band_queue);
         in_band_set_remotes(mgr->in_band, addrs, n_addrs);
     }
 
@@ -1044,7 +1058,7 @@ ofconn_set_protocol(struct ofconn *ofconn, enum ofputil_protocol protocol)
  * NXPIF_*.
  *
  * The default, if no other format has been set, is NXPIF_STANDARD. */
-enum nx_packet_in_format
+enum ofputil_packet_in_format
 ofconn_get_packet_in_format(struct ofconn *ofconn)
 {
     return ofconn->packet_in_format;
@@ -1054,7 +1068,7 @@ ofconn_get_packet_in_format(struct ofconn *ofconn)
  * NXPIF_*). */
 void
 ofconn_set_packet_in_format(struct ofconn *ofconn,
-                            enum nx_packet_in_format packet_in_format)
+                            enum ofputil_packet_in_format packet_in_format)
 {
     ofconn->packet_in_format = packet_in_format;
 }
@@ -1092,6 +1106,16 @@ ofconn_set_async_config(struct ofconn *ofconn,
         ofconn->async_cfg = xmalloc(sizeof *ofconn->async_cfg);
     }
     *ofconn->async_cfg = *ac;
+
+    if (ofputil_protocol_to_ofp_version(ofconn_get_protocol(ofconn))
+        < OFP14_VERSION) {
+        if (ofconn->async_cfg->master[OAM_PACKET_IN] & (1u << OFPR_ACTION)) {
+            ofconn->async_cfg->master[OAM_PACKET_IN] |= OFPR14_ACTION_BITS;
+        }
+        if (ofconn->async_cfg->slave[OAM_PACKET_IN] & (1u << OFPR_ACTION)) {
+            ofconn->async_cfg->slave[OAM_PACKET_IN] |= OFPR14_ACTION_BITS;
+        }
+    }
 }
 
 struct ofputil_async_cfg
@@ -1129,8 +1153,7 @@ ofconn_send_replies(const struct ofconn *ofconn, struct ovs_list *replies)
     }
 }
 
-/* Sends 'error' on 'ofconn', as a reply to 'request'.  Only at most the
- * first 64 bytes of 'request' are used. */
+/* Sends 'error' on 'ofconn', as a reply to 'request'. */
 void
 ofconn_send_error(const struct ofconn *ofconn,
                   const struct ofp_header *request, enum ofperr error)
@@ -1212,20 +1235,16 @@ ofconn_get_bundle(struct ofconn *ofconn, uint32_t id)
     return NULL;
 }
 
-enum ofperr
+void
 ofconn_insert_bundle(struct ofconn *ofconn, struct ofp_bundle *bundle)
 {
     hmap_insert(&ofconn->bundles, &bundle->node, bundle_hash(bundle->id));
-
-    return 0;
 }
 
-enum ofperr
+void
 ofconn_remove_bundle(struct ofconn *ofconn, struct ofp_bundle *bundle)
 {
     hmap_remove(&ofconn->bundles, &bundle->node);
-
-    return 0;
 }
 
 static void
@@ -1242,11 +1261,11 @@ static void
 bundle_remove_expired(struct ofconn *ofconn, long long int now)
 {
     struct ofp_bundle *b, *next;
-    long long int limit = now - BUNDLE_IDLE_TIMEOUT;
+    long long int limit = now - bundle_idle_timeout;
 
     HMAP_FOR_EACH_SAFE (b, next, node, &ofconn->bundles) {
         if (b->used <= limit) {
-            ofconn_send_error(ofconn, &b->ofp_msg, OFPERR_OFPBFC_TIMEOUT);
+            ofconn_send_error(ofconn, b->msg, OFPERR_OFPBFC_TIMEOUT);
             ofp_bundle_remove__(ofconn, b);
         }
     }
@@ -1298,7 +1317,7 @@ ofconn_flush(struct ofconn *ofconn)
 
     ofconn->role = OFPCR12_ROLE_EQUAL;
     ofconn_set_protocol(ofconn, OFPUTIL_P_NONE);
-    ofconn->packet_in_format = NXPIF_STANDARD;
+    ofconn->packet_in_format = OFPUTIL_PACKET_IN_STD;
 
     rconn_packet_counter_destroy(ofconn->packet_in_counter);
     ofconn->packet_in_counter = rconn_packet_counter_create();
@@ -1730,7 +1749,7 @@ connmgr_send_async_msg(struct connmgr *mgr,
         if (protocol == OFPUTIL_P_NONE || !rconn_is_connected(ofconn->rconn)
             || ofconn->controller_id != am->controller_id
             || !ofconn_receives_async_msg(ofconn, am->oam,
-                                          am->pin.up.public.reason)) {
+                                          am->pin.up.base.reason)) {
             continue;
         }
 
@@ -1738,11 +1757,11 @@ connmgr_send_async_msg(struct connmgr *mgr,
             &am->pin.up, protocol, ofconn->packet_in_format);
 
         struct ovs_list txq;
-        bool is_miss = (am->pin.up.public.reason == OFPR_NO_MATCH ||
-                        am->pin.up.public.reason == OFPR_EXPLICIT_MISS ||
-                        am->pin.up.public.reason == OFPR_IMPLICIT_MISS);
+        bool is_miss = (am->pin.up.base.reason == OFPR_NO_MATCH ||
+                        am->pin.up.base.reason == OFPR_EXPLICIT_MISS ||
+                        am->pin.up.base.reason == OFPR_IMPLICIT_MISS);
         pinsched_send(ofconn->schedulers[is_miss],
-                      am->pin.up.public.flow_metadata.flow.in_port.ofp_port,
+                      am->pin.up.base.flow_metadata.flow.in_port.ofp_port,
                       msg, &txq);
         do_send_packet_ins(ofconn, &txq);
     }
@@ -1756,9 +1775,9 @@ do_send_packet_ins(struct ofconn *ofconn, struct ovs_list *txq)
     LIST_FOR_EACH_POP (pin, list_node, txq) {
         if (rconn_send_with_limit(ofconn->rconn, pin,
                                   ofconn->packet_in_counter, 100) == EAGAIN) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
+            static struct vlog_rate_limit rll = VLOG_RATE_LIMIT_INIT(5, 5);
 
-            VLOG_INFO_RL(&rl, "%s: dropping packet-in due to queue overflow",
+            VLOG_INFO_RL(&rll, "%s: dropping packet-in due to queue overflow",
                          rconn_get_name(ofconn->rconn));
         }
     }
@@ -2227,22 +2246,22 @@ ofmonitor_flush(struct connmgr *mgr)
     struct ofconn *ofconn;
 
     LIST_FOR_EACH (ofconn, node, &mgr->all_conns) {
+        struct rconn_packet_counter *counter = ofconn->monitor_counter;
+
         struct ofpbuf *msg;
-
         LIST_FOR_EACH_POP (msg, list_node, &ofconn->updates) {
-            unsigned int n_bytes;
+            ofconn_send(ofconn, msg, counter);
+        }
 
-            ofconn_send(ofconn, msg, ofconn->monitor_counter);
-            n_bytes = rconn_packet_counter_n_bytes(ofconn->monitor_counter);
-            if (!ofconn->monitor_paused && n_bytes > 128 * 1024) {
-                struct ofpbuf *pause;
+        if (!ofconn->monitor_paused
+            && rconn_packet_counter_n_bytes(counter) > 128 * 1024) {
+            struct ofpbuf *pause;
 
-                COVERAGE_INC(ofmonitor_pause);
-                ofconn->monitor_paused = monitor_seqno++;
-                pause = ofpraw_alloc_xid(OFPRAW_NXT_FLOW_MONITOR_PAUSED,
-                                         OFP10_VERSION, htonl(0), 0);
-                ofconn_send(ofconn, pause, ofconn->monitor_counter);
-            }
+            COVERAGE_INC(ofmonitor_pause);
+            ofconn->monitor_paused = monitor_seqno++;
+            pause = ofpraw_alloc_xid(OFPRAW_NXT_FLOW_MONITOR_PAUSED,
+                                     OFP10_VERSION, htonl(0), 0);
+            ofconn_send(ofconn, pause, counter);
         }
     }
 }
@@ -2312,8 +2331,8 @@ ofmonitor_wait(struct connmgr *mgr)
 void
 ofproto_async_msg_free(struct ofproto_async_msg *am)
 {
-    free(am->pin.up.public.packet);
-    free(am->pin.up.public.userdata);
+    free(am->pin.up.base.packet);
+    free(am->pin.up.base.userdata);
     free(am->pin.up.stack);
     free(am->pin.up.actions);
     free(am->pin.up.action_set);

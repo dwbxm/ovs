@@ -79,11 +79,14 @@ AC_DEFUN([OVS_CHECK_WIN64],
      if (cl) 2>&1 | grep 'x64' >/dev/null 2>&1; then
        cl_cv_x64=yes
        MSVC64_LDFLAGS=" /MACHINE:X64 "
+       MSVC_PLATFORM="x64"
      else
        cl_cv_x64=no
        MSVC64_LDFLAGS=""
+       MSVC_PLATFORM="x86"
      fi])
      AC_SUBST([MSVC64_LDFLAGS])
+     AC_SUBST([MSVC_PLATFORM])
 ])
 
 dnl Checks for WINDOWS.
@@ -143,6 +146,7 @@ AC_DEFUN([OVS_CHECK_WIN32],
       )
 
       AC_DEFINE([WIN32], [1], [Define to 1 if building on WIN32.])
+      AC_CHECK_TYPES([struct timespec], [], [], [[#include <time.h>]])
       AH_BOTTOM([#ifdef WIN32
 #include "include/windows/windefs.h"
 #endif])
@@ -169,6 +173,32 @@ AC_ARG_WITH([vstudiotarget],
       )
 
   AC_SUBST([VSTUDIO_CONFIG])
+
+AC_ARG_WITH([vstudiotargetver],
+         [AS_HELP_STRING([--with-vstudiotargetver=target_ver1,target_ver2],
+            [Target versions: Win8,Win8.1,Win10])],
+         [
+            targetver=`echo "$withval" | tr -s , ' ' `
+            for ver in $targetver; do
+                case "$ver" in
+                "Win8") VSTUDIO_WIN8=true ;;
+                "Win8.1")  VSTUDIO_WIN8_1=true ;;
+                "Win10") VSTUDIO_WIN10=true ;;
+                *) AC_MSG_ERROR([No valid Visual Studio target version found]) ;;
+                esac
+            done
+
+         ], [
+            VSTUDIO_WIN8=true
+            VSTUDIO_WIN8_1=true
+            VSTUDIO_WIN10=true
+         ]
+      )
+
+  AM_CONDITIONAL([VSTUDIO_WIN8], [test -n "$VSTUDIO_WIN8"])
+  AM_CONDITIONAL([VSTUDIO_WIN8_1], [test -n "$VSTUDIO_WIN8_1"])
+  AM_CONDITIONAL([VSTUDIO_WIN10], [test -n "$VSTUDIO_WIN10"])
+
   AC_DEFINE([VSTUDIO_DDK], [1], [System uses the Visual Studio build target.])
   AM_CONDITIONAL([VSTUDIO_DDK], [test -n "$VSTUDIO_CONFIG"])
 ])
@@ -318,15 +348,15 @@ AC_DEFUN([OVS_CHECK_VALGRIND],
   [AC_CHECK_HEADERS([valgrind/valgrind.h])])
 
 dnl Checks for Python 2.x, x >= 7.
-AC_DEFUN([OVS_CHECK_PYTHON],
+AC_DEFUN([OVS_CHECK_PYTHON2],
   [AC_CACHE_CHECK(
      [for Python 2.x for x >= 7],
-     [ovs_cv_python],
-     [if test -n "$PYTHON"; then
-        ovs_cv_python=$PYTHON
+     [ovs_cv_python2],
+     [if test -n "$PYTHON2"; then
+        ovs_cv_python2=$PYTHON2
       else
-        ovs_cv_python=no
-        for binary in python python2.7; do
+        ovs_cv_python2=no
+        for binary in python2 python2.7 python; do
           ovs_save_IFS=$IFS; IFS=$PATH_SEPARATOR
           for dir in $PATH; do
             IFS=$ovs_save_IFS
@@ -336,27 +366,27 @@ if sys.hexversion >= 0x02070000 and sys.hexversion < 0x03000000:
     sys.exit(0)
 else:
     sys.exit(1)'; then
-              ovs_cv_python=$dir/$binary
+              ovs_cv_python2=$dir/$binary
               break 2
             fi
           done
         done
-        if test $ovs_cv_python != no; then
-          if test -x "$ovs_cv_python" && ! "$ovs_cv_python" -c 'import six' >/dev/null 2>&1; then
-            ovs_cv_python=no
-            AC_MSG_WARN([Missing Python six library.])
+        if test $ovs_cv_python2 != no && test -x "$ovs_cv_python2"; then
+          if ! "$ovs_cv_python2" -c 'import six ; six.moves.range' >&AS_MESSAGE_LOG_FD 2>&1; then
+            ovs_cv_python2=no
+            AC_MSG_WARN([Missing Python six library or version too old.])
           fi
         fi
       fi])
-   AC_SUBST([HAVE_PYTHON])
-   AM_MISSING_PROG([PYTHON], [python])
-   if test $ovs_cv_python != no; then
-     PYTHON=$ovs_cv_python
-     HAVE_PYTHON=yes
+   AC_SUBST([HAVE_PYTHON2])
+   AM_MISSING_PROG([PYTHON2], [python2])
+   if test $ovs_cv_python2 != no; then
+     PYTHON2=$ovs_cv_python2
+     HAVE_PYTHON2=yes
    else
-     HAVE_PYTHON=no
+     HAVE_PYTHON2=no
    fi
-   AM_CONDITIONAL([HAVE_PYTHON], [test "$HAVE_PYTHON" = yes])])
+   AM_CONDITIONAL([HAVE_PYTHON2], [test "$HAVE_PYTHON2" = yes])])
 
 dnl Checks for Python 3.x, x >= 4.
 AC_DEFUN([OVS_CHECK_PYTHON3],
@@ -399,6 +429,29 @@ else:
    fi
    AM_CONDITIONAL([HAVE_PYTHON3], [test "$HAVE_PYTHON3" = yes])])
 
+dnl Checks if you have any compatible Python version installed.
+dnl Python 2.7+ has the preference to 3.4+
+AC_DEFUN([OVS_CHECK_PYTHON],
+  [AC_CACHE_CHECK(
+     [for Python 2 or 3],
+     [ovs_cv_python],
+     [if test -n "$PYTHON"; then
+        ovs_cv_python=$PYTHON
+      else
+        ovs_cv_python=no
+        if test $ovs_cv_python2 != no; then
+          ovs_cv_python=$ovs_cv_python2
+        elif test $ovs_cv_python3 != no; then
+          ovs_cv_python=$ovs_cv_python3
+        else
+          AC_MSG_ERROR([Missing Python.])
+        fi
+      fi])
+    AC_SUBST([PYTHON])
+    PYTHON=$ovs_cv_python
+    AC_SUBST([HAVE_PYTHON])
+    HAVE_PYTHON=yes
+    AM_CONDITIONAL([HAVE_PYTHON], [test "$HAVE_PYTHON" = yes])])
 
 dnl Checks for flake8.
 AC_DEFUN([OVS_CHECK_FLAKE8],
@@ -417,7 +470,7 @@ AC_DEFUN([OVS_CHECK_SPHINX],
   [AC_CACHE_CHECK(
     [for sphinx],
     [ovs_cv_sphinx],
-    [if sphinx-build --version >/dev/null 2>&1; then
+    [if type sphinx-build >/dev/null 2>&1; then
        ovs_cv_sphinx=yes
      else
        ovs_cv_sphinx=no
@@ -565,7 +618,7 @@ TEST_ATOMIC_TYPE(unsigned long long int);
 dnl OVS_CHECK_ATOMIC_ALWAYS_LOCK_FREE(SIZE)
 dnl
 dnl Checks __atomic_always_lock_free(SIZE, 0)
-AC_DEFUN([OVS_CHECK_ATOMIC_ALWAYS_LOCK_FREE], 
+AC_DEFUN([OVS_CHECK_ATOMIC_ALWAYS_LOCK_FREE],
   [AC_CACHE_CHECK(
     [value of __atomic_always_lock_free($1)],
     [ovs_cv_atomic_always_lock_free_$1],
@@ -610,9 +663,38 @@ AC_DEFUN([OVS_LIBTOOL_VERSIONS],
   OVS_MAJOR=`echo "$PACKAGE_VERSION" | sed -e 's/[[.]].*//'`
   OVS_MINOR=`echo "$PACKAGE_VERSION" | sed -e "s/^$OVS_MAJOR//" -e 's/^.//' -e 's/[[.]].*//'`
   OVS_MICRO=`echo "$PACKAGE_VERSION" | sed -e "s/^$OVS_MAJOR.$OVS_MINOR//" -e 's/^.//' -e 's/[[^0-9]].*//'`
-  OVS_LT_RELINFO="-release $OVS_MAJOR"
-  OVS_LT_VERINFO="-version-info $OVS_MINOR:$OVS_MICRO"
+  OVS_LT_RELINFO="-release $OVS_MAJOR.$OVS_MINOR"
+  OVS_LT_VERINFO="-version-info $LT_CURRENT:$OVS_MICRO"
   OVS_LTINFO="$OVS_LT_RELINFO $OVS_LT_VERINFO"
-  AC_MSG_RESULT([libX-$OVS_MAJOR.so.$OVS_MINOR.0.$OVS_MICRO)])
+  AC_MSG_RESULT([libX-$OVS_MAJOR.$OVS_MINOR.so.$LT_CURRENT.0.$OVS_MICRO)])
   AC_SUBST(OVS_LTINFO)
     ])
+
+dnl OVS does not use C++ itself, but it provides public header files
+dnl that a C++ compiler should accept, so when --enable-Werror is in
+dnl effect and a C++ compiler is available, we enable building a C++
+dnl source file that #includes all the public headers, as a way to
+dnl ensure that they are acceptable as C++.
+AC_DEFUN([OVS_CHECK_CXX],
+  [AC_REQUIRE([AC_PROG_CXX])
+   AC_REQUIRE([OVS_ENABLE_WERROR])
+   AX_CXX_COMPILE_STDCXX([11], [], [optional])
+   if test $enable_Werror = yes && test $HAVE_CXX11 = 1; then
+     enable_cxx=:
+     AC_LANG_PUSH([C++])
+     AC_CHECK_HEADERS([atomic])
+     AC_LANG_POP([C++])
+   else
+     enable_cxx=false
+   fi
+   AM_CONDITIONAL([HAVE_CXX], [$enable_cxx])])
+
+dnl Checks for unbound library.
+AC_DEFUN([OVS_CHECK_UNBOUND],
+  [AC_CHECK_LIB(unbound, ub_ctx_create, [HAVE_UNBOUND=yes])
+   if test "$HAVE_UNBOUND" = yes; then
+     AC_DEFINE([HAVE_UNBOUND], [1], [Define to 1 if unbound is detected.])
+     LIBS="$LIBS -lunbound"
+   fi
+   AM_CONDITIONAL([HAVE_UNBOUND], [test "$HAVE_UNBOUND" = yes])
+   AC_SUBST([HAVE_UNBOUND])])

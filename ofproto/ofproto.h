@@ -290,7 +290,7 @@ int ofproto_port_dump_done(struct ofproto_port_dump *);
 #define OFPROTO_FLOW_LIMIT_DEFAULT 200000
 #define OFPROTO_MAX_IDLE_DEFAULT 10000 /* ms */
 
-const char *ofproto_port_open_type(const char *datapath_type,
+const char *ofproto_port_open_type(const struct ofproto *,
                                    const char *port_type);
 int ofproto_port_add(struct ofproto *, struct netdev *, ofp_port_t *ofp_portp);
 int ofproto_port_del(struct ofproto *, ofp_port_t ofp_port);
@@ -312,6 +312,7 @@ void ofproto_reconnect_controllers(struct ofproto *);
 void ofproto_set_extra_in_band_remotes(struct ofproto *,
                                        const struct sockaddr_in *, size_t n);
 void ofproto_set_in_band_queue(struct ofproto *, int queue_id);
+void ofproto_set_bundle_idle_timeout(unsigned timeout);
 void ofproto_set_flow_limit(unsigned limit);
 void ofproto_set_max_idle(unsigned max_idle);
 void ofproto_set_forward_bpdu(struct ofproto *, bool forward_bpdu);
@@ -340,6 +341,7 @@ int ofproto_get_stp_status(struct ofproto *, struct ofproto_stp_status *);
 
 int ofproto_set_rstp(struct ofproto *, const struct ofproto_rstp_settings *);
 int ofproto_get_rstp_status(struct ofproto *, struct ofproto_rstp_status *);
+void ofproto_set_vlan_limit(int vlan_limit);
 
 /* Configuration of ports. */
 void ofproto_port_unregister(struct ofproto *, ofp_port_t ofp_port);
@@ -387,7 +389,11 @@ enum port_vlan_mode {
     /* Untagged incoming packets are part of 'vlan', as are incoming packets
      * tagged with 'vlan'.  Outgoing packets tagged with 'vlan' are untagged.
      * Other VLANs in 'trunks' are trunked. */
-    PORT_VLAN_NATIVE_UNTAGGED
+    PORT_VLAN_NATIVE_UNTAGGED,
+
+    /* 802.1q tunnel port. Incoming packets are added an outer vlan tag
+     * 'vlan'. If 'cvlans' is set, only allows VLANs in 'cvlans'. */
+    PORT_VLAN_DOT1Q_TUNNEL
 };
 
 /* Configuration of bundles. */
@@ -398,8 +404,10 @@ struct ofproto_bundle_settings {
     size_t n_slaves;
 
     enum port_vlan_mode vlan_mode; /* Selects mode for vlan and trunks */
+    uint16_t qinq_ethtype;
     int vlan;                   /* VLAN VID, except for PORT_VLAN_TRUNK. */
     unsigned long *trunks;      /* vlan_bitmap, except for PORT_VLAN_ACCESS. */
+    unsigned long *cvlans;
     bool use_priority_tags;     /* Use 802.1p tag for frames in VLAN 0? */
 
     struct bond_settings *bond; /* Must be nonnull iff if n_slaves > 1. */

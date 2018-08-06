@@ -52,6 +52,7 @@
 #include <net/ip6_route.h>
 #endif
 
+#include <net/tun_proto.h>
 #include <net/vxlan.h>
 #include "gso.h"
 #include "vport-netdev.h"
@@ -607,19 +608,9 @@ static bool vxlan_parse_gpe_hdr(struct vxlanhdr *unparsed,
 	if (gpe->oam_flag)
 		return false;
 
-	switch (gpe->next_protocol) {
-	case VXLAN_GPE_NP_IPV4:
-		*protocol = htons(ETH_P_IP);
-		break;
-	case VXLAN_GPE_NP_IPV6:
-		*protocol = htons(ETH_P_IPV6);
-		break;
-	case VXLAN_GPE_NP_ETHERNET:
-		*protocol = htons(ETH_P_TEB);
-		break;
-	default:
+	*protocol = tun_p_to_eth_p(gpe->next_protocol);
+	if (!*protocol)
 		return false;
-	}
 
 	unparsed->vx_flags &= ~VXLAN_GPE_USED_BITS;
 	return true;
@@ -815,19 +806,10 @@ static int vxlan_build_gpe_hdr(struct vxlanhdr *vxh, u32 vxflags,
 	struct vxlanhdr_gpe *gpe = (struct vxlanhdr_gpe *)vxh;
 
 	gpe->np_applied = 1;
-
-	switch (protocol) {
-	case htons(ETH_P_IP):
-		gpe->next_protocol = VXLAN_GPE_NP_IPV4;
-		return 0;
-	case htons(ETH_P_IPV6):
-		gpe->next_protocol = VXLAN_GPE_NP_IPV6;
-		return 0;
-	case htons(ETH_P_TEB):
-		gpe->next_protocol = VXLAN_GPE_NP_ETHERNET;
-		return 0;
-	}
-	return -EPFNOSUPPORT;
+	gpe->next_protocol = tun_p_from_eth_p(protocol);
+	if (!gpe->next_protocol)
+		return -EPFNOSUPPORT;
+	return 0;
 }
 
 static int vxlan_build_skb(struct sk_buff *skb, struct dst_entry *dst,
@@ -862,7 +844,8 @@ static int vxlan_build_skb(struct sk_buff *skb, struct dst_entry *dst,
 	if (unlikely(err))
 		goto out_free;
 
-	skb = vlan_hwaccel_push_inside(skb);
+	if (skb_vlan_tag_present(skb))
+		skb = __vlan_hwaccel_push_inside(skb);
 	if (WARN_ON(!skb))
 		return -ENOMEM;
 
@@ -913,10 +896,11 @@ out_free:
 static struct rtable *vxlan_get_route(struct vxlan_dev *vxlan,
 				      struct sk_buff *skb, int oif, u8 tos,
 				      __be32 daddr, __be32 *saddr,
+				      __be16 dport, __be16 sport,
 				      struct dst_cache *dst_cache,
 				      const struct ip_tunnel_info *info)
 {
-	bool use_cache = ip_tunnel_dst_cache_usable(skb, info);
+	bool use_cache = (dst_cache && ip_tunnel_dst_cache_usable(skb, info));
 	struct rtable *rt = NULL;
 	struct flowi4 fl4;
 
@@ -935,6 +919,8 @@ static struct rtable *vxlan_get_route(struct vxlan_dev *vxlan,
 	fl4.flowi4_proto = IPPROTO_UDP;
 	fl4.daddr = daddr;
 	fl4.saddr = *saddr;
+	fl4.fl4_dport = dport;
+	fl4.fl4_sport = sport;
 
 	rt = ip_route_output_key(vxlan->net, &fl4);
 	if (!IS_ERR(rt)) {
@@ -951,11 +937,12 @@ static struct dst_entry *vxlan6_get_route(struct vxlan_dev *vxlan,
 					  __be32 label,
 					  const struct in6_addr *daddr,
 					  struct in6_addr *saddr,
+					  __be16 dport, __be16 sport,
 					  struct dst_cache *dst_cache,
 					  const struct ip_tunnel_info *info)
 {
 	struct vxlan_sock *sock6 = rcu_dereference(vxlan->vn6_sock);
-	bool use_cache = ip_tunnel_dst_cache_usable(skb, info);
+	bool use_cache = (dst_cache && ip_tunnel_dst_cache_usable(skb, info));
 	struct dst_entry *ndst;
 	struct flowi6 fl6;
 	int err;
@@ -978,6 +965,8 @@ static struct dst_entry *vxlan6_get_route(struct vxlan_dev *vxlan,
 	fl6.flowlabel = ip6_make_flowinfo(RT_TOS(tos), label);
 	fl6.flowi6_mark = skb->mark;
 	fl6.flowi6_proto = IPPROTO_UDP;
+	fl6.fl6_dport = dport;
+	fl6.fl6_sport = sport;
 
 #ifdef HAVE_IPV6_DST_LOOKUP_NET
 	err = ipv6_stub->ipv6_dst_lookup(vxlan->net,
@@ -1107,6 +1096,7 @@ static void vxlan_xmit_one(struct sk_buff *skb, struct net_device *dev,
 				     rdst ? rdst->remote_ifindex : 0, tos,
 				     dst->sin.sin_addr.s_addr,
 				     &src->sin.sin_addr.s_addr,
+				     dst_port, src_port,
 				     dst_cache, info);
 		if (IS_ERR(rt)) {
 			netdev_dbg(dev, "no route to %pI4\n",
@@ -1166,6 +1156,7 @@ static void vxlan_xmit_one(struct sk_buff *skb, struct net_device *dev,
 					rdst ? rdst->remote_ifindex : 0, tos,
 					label, &dst->sin6.sin6_addr,
 					&src->sin6.sin6_addr,
+					dst_port, src_port,
 					dst_cache, info);
 		if (IS_ERR(ndst)) {
 			netdev_dbg(dev, "no route to %pI6\n",
@@ -1456,7 +1447,8 @@ int ovs_vxlan_fill_metadata_dst(struct net_device *dev, struct sk_buff *skb)
 			return -EINVAL;
 		rt = vxlan_get_route(vxlan, skb, 0, info->key.tos,
 				     info->key.u.ipv4.dst,
-				     &info->key.u.ipv4.src, NULL, info);
+				     &info->key.u.ipv4.src,
+				     dport, sport, NULL, info);
 		if (IS_ERR(rt))
 			return PTR_ERR(rt);
 		ip_rt_put(rt);
@@ -1466,7 +1458,8 @@ int ovs_vxlan_fill_metadata_dst(struct net_device *dev, struct sk_buff *skb)
 
 		ndst = vxlan6_get_route(vxlan, skb, 0, info->key.tos,
 					info->key.label, &info->key.u.ipv6.dst,
-					&info->key.u.ipv6.src, NULL, info);
+					&info->key.u.ipv6.src,
+					dport, sport, NULL, info);
 		if (IS_ERR(ndst))
 			return PTR_ERR(ndst);
 		dst_release(ndst);
@@ -1499,7 +1492,12 @@ static const struct net_device_ops vxlan_netdev_ether_ops = {
 	.ndo_start_xmit		= vxlan_dev_xmit,
 	.ndo_get_stats64	= ip_tunnel_get_stats64,
 	.ndo_set_rx_mode	= vxlan_set_multicast_list,
+#ifdef	HAVE_RHEL7_MAX_MTU
+	.ndo_size		= sizeof(struct net_device_ops),
+	.extended.ndo_change_mtu = vxlan_change_mtu,
+#else
 	.ndo_change_mtu		= vxlan_change_mtu,
+#endif
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 #ifdef HAVE_NDO_FILL_METADATA_DST
@@ -1514,7 +1512,12 @@ static const struct net_device_ops vxlan_netdev_raw_ops = {
 	.ndo_stop		= vxlan_stop,
 	.ndo_start_xmit		= vxlan_dev_xmit,
 	.ndo_get_stats64	= ip_tunnel_get_stats64,
+#ifdef	HAVE_RHEL7_MAX_MTU
+	.ndo_size		= sizeof(struct net_device_ops),
+	.extended.ndo_change_mtu = vxlan_change_mtu,
+#else
 	.ndo_change_mtu		= vxlan_change_mtu,
+#endif
 #ifdef HAVE_NDO_FILL_METADATA_DST
 	.ndo_fill_metadata_dst	= ovs_vxlan_fill_metadata_dst,
 #endif
@@ -1564,7 +1567,11 @@ static void vxlan_setup(struct net_device *dev)
 	eth_hw_addr_random(dev);
 	ether_setup(dev);
 
+#ifndef HAVE_NEEDS_FREE_NETDEV
 	dev->destructor = free_netdev;
+#else
+	dev->needs_free_netdev = true;
+#endif
 	SET_NETDEV_DEVTYPE(dev, &vxlan_type);
 
 	dev->features	|= NETIF_F_LLTX;
@@ -1644,7 +1651,12 @@ static const struct nla_policy vxlan_policy[IFLA_VXLAN_MAX + 1] = {
 	[IFLA_VXLAN_REMCSUM_NOPARTIAL]	= { .type = NLA_FLAG },
 };
 
+#ifdef HAVE_EXT_ACK_IN_RTNL_LINKOPS
+static int vxlan_validate(struct nlattr *tb[], struct nlattr *data[],
+			  struct netlink_ext_ack *extack)
+#else
 static int vxlan_validate(struct nlattr *tb[], struct nlattr *data[])
+#endif
 {
 	if (tb[IFLA_ADDRESS]) {
 		if (nla_len(tb[IFLA_ADDRESS]) != ETH_ALEN) {
@@ -1740,8 +1752,6 @@ static struct vxlan_sock *vxlan_socket_create(struct net *net, bool ipv6,
 
 	sock = vxlan_create_sock(net, ipv6, port, flags);
 	if (IS_ERR(sock)) {
-		pr_info("Cannot bind port %d, err=%ld\n", ntohs(port),
-			PTR_ERR(sock));
 		kfree(vs);
 		return ERR_CAST(sock);
 	}
@@ -1808,17 +1818,21 @@ static int __vxlan_sock_add(struct vxlan_dev *vxlan, bool ipv6)
 
 static int vxlan_sock_add(struct vxlan_dev *vxlan)
 {
-	bool ipv6 = vxlan->flags & VXLAN_F_IPV6;
 	bool metadata = vxlan->flags & VXLAN_F_COLLECT_METADATA;
+	bool ipv6 = vxlan->flags & VXLAN_F_IPV6 || metadata;
+	bool ipv4 = !ipv6 || metadata;
 	int ret = 0;
 
 	RCU_INIT_POINTER(vxlan->vn4_sock, NULL);
 #if IS_ENABLED(CONFIG_IPV6)
 	RCU_INIT_POINTER(vxlan->vn6_sock, NULL);
-	if (ipv6 || metadata)
+	if (ipv6) {
 		ret = __vxlan_sock_add(vxlan, true);
+		if (ret < 0 && ret != -EAFNOSUPPORT)
+			ipv4 = false;
+	}
 #endif
-	if (!ret && (!ipv6 || metadata))
+	if (ipv4)
 		ret = __vxlan_sock_add(vxlan, false);
 	if (ret < 0)
 		vxlan_sock_release(vxlan);
@@ -1961,8 +1975,14 @@ static int vxlan_dev_configure(struct net *src_net, struct net_device *dev,
 	return 0;
 }
 
+#ifdef HAVE_EXT_ACK_IN_RTNL_LINKOPS
+static int vxlan_newlink(struct net *src_net, struct net_device *dev,
+			 struct nlattr *tb[], struct nlattr *data[],
+			 struct netlink_ext_ack *extack)
+#else
 static int vxlan_newlink(struct net *src_net, struct net_device *dev,
 			 struct nlattr *tb[], struct nlattr *data[])
+#endif
 {
 	pr_info("unsupported operation\n");
 	return -EINVAL;

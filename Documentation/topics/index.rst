@@ -42,11 +42,14 @@ OVS
    porting
    openflow
    bonding
+   networking-namespaces
    ovsdb-replication
    dpdk/index
    windows
    language-bindings
    testing
+   tracing
+   idl-compound-indexes
 
 OVN
 ---
@@ -55,6 +58,8 @@ OVN
    :maxdepth: 2
 
    high-availability
+   role-based-access-control
+   ovn-news-2.8
 
 .. list-table::
 

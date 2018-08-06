@@ -15,7 +15,7 @@
  */
 
 #include <config.h>
-#include "rconn.h"
+#include "openvswitch/rconn.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -27,11 +27,12 @@
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vconn.h"
 #include "openvswitch/vlog.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "sat-math.h"
 #include "stream.h"
 #include "timeval.h"
 #include "util.h"
+#include "ovs-thread.h"
 
 VLOG_DEFINE_THIS_MODULE(rconn);
 
@@ -140,7 +141,16 @@ struct rconn {
     struct vconn *monitors[MAXIMUM_MONITORS];
     size_t n_monitors;
 
-    uint32_t allowed_versions;
+    uint32_t allowed_versions;  /* Acceptable OpenFlow versions. */
+    int version;                /* Current or most recent version. */
+};
+
+/* Counts packets and bytes queued into an rconn by a given source. */
+struct rconn_packet_counter {
+    struct ovs_mutex mutex;
+    unsigned int n_packets OVS_GUARDED; /* Number of packets queued. */
+    unsigned int n_bytes OVS_GUARDED;   /* Number of bytes queued. */
+    int ref_cnt OVS_GUARDED;            /* Number of owners. */
 };
 
 uint32_t rconn_get_allowed_versions(const struct rconn *rconn)
@@ -173,8 +183,6 @@ static bool is_connected_state(enum state);
 static bool is_admitted_msg(const struct ofpbuf *);
 static bool rconn_logging_connection_attempts__(const struct rconn *rc)
     OVS_REQUIRES(rc->mutex);
-static int rconn_get_version__(const struct rconn *rconn)
-    OVS_REQUIRES(rconn->mutex);
 
 /* The following prototypes duplicate those in rconn.h, but there we weren't
  * able to add the OVS_EXCLUDED annotations because the definition of struct
@@ -275,7 +283,9 @@ rconn_create(int probe_interval, int max_backoff, uint8_t dscp,
     rconn_set_dscp(rc, dscp);
 
     rc->n_monitors = 0;
+
     rc->allowed_versions = allowed_versions;
+    rc->version = -1;
 
     return rc;
 }
@@ -367,8 +377,7 @@ rconn_connect_unreliably(struct rconn *rc,
     rconn_set_target__(rc, vconn_get_name(vconn), name);
     rc->reliable = false;
     rc->vconn = vconn;
-    rc->last_connected = time_now();
-    state_transition(rc, S_ACTIVE);
+    state_transition(rc, S_CONNECTING);
     ovs_mutex_unlock(&rc->mutex);
 }
 
@@ -502,9 +511,10 @@ run_CONNECTING(struct rconn *rc)
 {
     int retval = vconn_connect(rc->vconn);
     if (!retval) {
-        VLOG_INFO("%s: connected", rc->name);
+        VLOG(rc->reliable ? VLL_INFO : VLL_DBG, "%s: connected", rc->name);
         rc->n_successful_connections++;
         state_transition(rc, S_ACTIVE);
+        rc->version = vconn_get_version(rc->vconn);
         rc->last_connected = rc->state_entered;
     } else if (retval != EAGAIN) {
         if (rconn_logging_connection_attempts__(rc)) {
@@ -566,14 +576,8 @@ run_ACTIVE(struct rconn *rc)
          * can end up queuing a packet with vconn == NULL and then *boom*. */
         state_transition(rc, S_IDLE);
 
-        /* Send an echo request if we can.  (If version negotiation is not
-         * complete, that is, if we did not yet receive a "hello" message from
-         * the peer, we do not know the version to use, so we don't send
-         * anything.) */
-        int version = rconn_get_version__(rc);
-        if (version >= 0 && version <= 0xff) {
-            rconn_send__(rc, make_echo_request(version), NULL);
-        }
+        /* Send an echo request. */
+        rconn_send__(rc, ofputil_encode_echo_request(rc->version), NULL);
 
         return;
     }
@@ -935,23 +939,19 @@ rconn_failure_duration(const struct rconn *rconn)
     return duration;
 }
 
-static int
-rconn_get_version__(const struct rconn *rconn)
-    OVS_REQUIRES(rconn->mutex)
-{
-    return rconn->vconn ? vconn_get_version(rconn->vconn) : -1;
-}
-
-/* Returns the OpenFlow version negotiated with the peer, or -1 if there is
- * currently no connection or if version negotiation is not yet complete. */
+/* Returns the OpenFlow version most recently negotiated with a peer, or -1 if
+ * no version has ever been negotiated.
+ *
+ * If 'rconn' is connected (that is, if 'rconn_is_connected(rconn)' would
+ * return true), then the return value is guaranteed to be the OpenFlow version
+ * in use for the connection.  The converse is not true: when the return value
+ * is not -1, 'rconn' might be disconnected. */
 int
 rconn_get_version(const struct rconn *rconn)
     OVS_EXCLUDED(rconn->mutex)
 {
-    int version;
-
     ovs_mutex_lock(&rconn->mutex);
-    version = rconn_get_version__(rconn);
+    int version = rconn->version;
     ovs_mutex_unlock(&rconn->mutex);
 
     return version;

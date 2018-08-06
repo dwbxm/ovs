@@ -29,7 +29,7 @@
 #include "openvswitch/list.h"
 #include "netdev-dpdk.h"
 #include "ovs-rcu.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "seq.h"
 #include "socket-util.h"
 #include "util.h"
@@ -315,7 +315,7 @@ ovs_barrier_block(struct ovs_barrier *barrier)
     }
 }
 
-DEFINE_EXTERN_PER_THREAD_DATA(ovsthread_id, 0);
+DEFINE_EXTERN_PER_THREAD_DATA(ovsthread_id, OVSTHREAD_ID_UNSET);
 
 struct ovsthread_aux {
     void *(*start)(void *);
@@ -323,17 +323,23 @@ struct ovsthread_aux {
     char name[16];
 };
 
+unsigned int
+ovsthread_id_init(void)
+{
+    static atomic_count next_id = ATOMIC_COUNT_INIT(0);
+
+    ovs_assert(*ovsthread_id_get() == OVSTHREAD_ID_UNSET);
+    return *ovsthread_id_get() = atomic_count_inc(&next_id);
+}
+
 static void *
 ovsthread_wrapper(void *aux_)
 {
-    static atomic_count next_id = ATOMIC_COUNT_INIT(1);
-
     struct ovsthread_aux *auxp = aux_;
     struct ovsthread_aux aux;
     unsigned int id;
 
-    id = atomic_count_inc(&next_id);
-    *ovsthread_id_get() = id;
+    id = ovsthread_id_init();
 
     aux = *auxp;
     free(auxp);
@@ -402,7 +408,7 @@ ovs_thread_create(const char *name, void *(*start)(void *), void *arg)
 
     /* Some small systems use a default stack size as small as 80 kB, but OVS
      * requires approximately 384 kB according to the following analysis:
-     * http://openvswitch.org/pipermail/dev/2016-January/065049.html
+     * https://mail.openvswitch.org/pipermail/ovs-dev/2016-January/308592.html
      *
      * We use 512 kB to give us some margin of error. */
     pthread_attr_t attr;

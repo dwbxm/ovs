@@ -65,6 +65,9 @@ Q: What Linux kernel versions does each Open vSwitch release work with?
     2.5.x        2.6.32 to 4.3
     2.6.x        3.10 to 4.7
     2.7.x        3.10 to 4.9
+    2.8.x        3.10 to 4.12
+    2.9.x        3.10 to 4.13
+    2.10.x       3.10 to 4.14
     ============ ==============
 
     Open vSwitch userspace should also work with the Linux kernel module built
@@ -104,7 +107,7 @@ Q: Are all features available with all datapaths?
     ===================== ============== ============== ========= =======
     Feature               Linux upstream Linux OVS tree Userspace Hyper-V
     ===================== ============== ============== ========= =======
-    NAT                   4.6            YES            NO        NO
+    NAT                   4.6            YES            Yes       NO
     Connection tracking   4.3            YES            PARTIAL   PARTIAL
     Tunnel - LISP         NO             YES            NO        NO
     Tunnel - STT          NO             YES            NO        YES
@@ -121,6 +124,7 @@ Q: Are all features available with all datapaths?
     Set action            YES            YES            YES       PARTIAL
     NIC Bonding           YES            YES            YES       YES
     Multiple VTEPs        YES            YES            YES       YES
+    Meters                4.15           YES            YES       NO
     ===================== ============== ============== ========= =======
 
     Do note, however:
@@ -160,16 +164,34 @@ Q: What DPDK version does each Open vSwitch release work with?
     2.4.x        2.0
     2.5.x        2.2
     2.6.x        16.07.2
-    2.7.x        16.11.1
+    2.7.x        16.11.7
+    2.8.x        17.05.2
+    2.9.x        17.11.3
     ============ =======
 
-Q: I get an error like this when I configure Open vSwitch::
+Q: Are all the DPDK releases that OVS versions work with maintained?
 
-    configure: error: Linux kernel in <dir> is version <x>, but
-    version newer than <y> is not supported (please refer to the
-    FAQ for advice)
+    No. DPDK follows YY.MM.n (Year.Month.Number) versioning.
 
-What should I do?
+    Typically, all DPDK releases get a stable YY.MM.1 update with bugfixes 3
+    months after the YY.MM.0 release. In some cases there may also be a
+    YY.MM.2 release.
+
+    DPDK LTS releases start once a year at YY.11.0 and are maintained for
+    two years, with YY.MM.n+1 releases around every 3 months.
+
+    The latest information about DPDK stable and LTS releases can be found
+    at `DPDK stable`_.
+
+.. _DPDK stable: http://dpdk.org/doc/guides/contributing/stable.html
+
+Q: I get an error like this when I configure Open vSwitch:
+
+        configure: error: Linux kernel in <dir> is version <x>, but
+        version newer than <y> is not supported (please refer to the
+        FAQ for advice)
+
+    What should I do?
 
     A: You have the following options:
 

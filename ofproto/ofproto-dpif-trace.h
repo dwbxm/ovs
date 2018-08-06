@@ -28,14 +28,18 @@
  * each action (OFT_ACTION) executed in the table.
  */
 
+#include "openvswitch/dynamic-string.h"
+#include "ofproto/ofproto-dpif.h"
 #include "openvswitch/compiler.h"
 #include "openvswitch/list.h"
+#include "flow.h"
 
 /* Type of a node within a trace. */
 enum oftrace_node_type {
     /* Nodes that may have children (nonterminal nodes). */
     OFT_BRIDGE,                 /* Packet travel through an OpenFlow switch. */
     OFT_TABLE,                  /* Packet travel through a flow table. */
+    OFT_BUCKET,                 /* Executing a bucket in an OpenFlow group. */
     OFT_THAW,                   /* Thawing a frozen state. */
 
     /* Nodes that never have children (terminal nodes). */
@@ -43,6 +47,13 @@ enum oftrace_node_type {
     OFT_DETAIL,                 /* Some detail of an action. */
     OFT_WARN,                   /* A worrisome situation. */
     OFT_ERROR,                  /* An erroneous situation, worth logging. */
+};
+
+/* Reason why a flow is in a recirculation queue. */
+enum oftrace_recirc_type {
+    OFT_RECIRC_CONNTRACK,
+    OFT_RECIRC_MPLS,
+    OFT_RECIRC_BOND,
 };
 
 /* A node within a trace. */
@@ -54,9 +65,33 @@ struct oftrace_node {
     char *text;
 };
 
+/* A node within a recirculation queue. */
+struct oftrace_recirc_node {
+    struct ovs_list node;       /* In recirc_queue. */
+
+    enum oftrace_recirc_type type;
+    uint32_t recirc_id;
+    struct flow flow;
+    struct dp_packet *packet;
+};
+
+/* A node within a next_ct_states list. */
+struct oftrace_next_ct_state {
+    struct ovs_list node;       /* In next_ct_states. */
+    uint32_t state;
+};
+
 void ofproto_dpif_trace_init(void);
+void ofproto_trace(struct ofproto_dpif *ofproto, const struct flow *flow,
+              const struct dp_packet *packet,
+              const struct ofpact *, size_t ofpacts_len,
+              struct ovs_list *next_ct_states, struct ds *output);
 
 struct oftrace_node *oftrace_report(struct ovs_list *, enum oftrace_node_type,
                                     const char *text);
+bool oftrace_add_recirc_node(struct ovs_list *recirc_queue,
+                             enum oftrace_recirc_type, const struct flow *,
+                             const struct dp_packet *, uint32_t recirc_id,
+                             const uint16_t zone);
 
 #endif /* ofproto-dpif-trace.h */

@@ -29,6 +29,34 @@ This document describes how to build and install Open vSwitch on a generic
 Linux, FreeBSD, or NetBSD host. For specifics around installation on a specific
 platform, refer to one of the other installation guides listed in :doc:`index`.
 
+Obtaining Open vSwitch Sources
+------------------------------
+
+The canonical location for Open vSwitch source code is its Git
+repository, which you can clone into a directory named "ovs" with::
+
+    $ git clone https://github.com/openvswitch/ovs.git
+
+Cloning the repository leaves the "master" branch initially checked
+out.  This is the right branch for general development.  If, on the
+other hand, if you want to build a particular released version, you
+can check it out by running a command such as the following from the
+"ovs" directory::
+
+    $ git checkout v2.7.0
+
+The repository also has a branch for each release series.  For
+example, to obtain the latest fixes in the Open vSwitch 2.7.x release
+series, which might include bug fixes that have not yet been in any
+released version, you can check it out from the "ovs" directory with::
+
+    $ git checkout origin/branch-2.7
+
+If you do not want to use Git, you can also obtain tarballs for Open
+vSwitch release versions via http://openvswitch.org/download/, or
+download a ZIP file for any snapshot from the web interface at
+https://github.com/openvswitch/ovs.
+
 .. _general-build-reqs:
 
 Build Requirements
@@ -41,11 +69,9 @@ need the following software:
 
 - A C compiler, such as:
 
-  - GCC 4.x.
+  - GCC 4.6 or later.
 
-  - Clang. Clang 3.4 and later provide useful static semantic analysis and
-    thread-safety checks. For Ubuntu, there are nightly built packages
-    available on clang's website.
+  - Clang 3.4 or later.
 
   - MSVC 2013. Refer to :doc:`windows` for additional Windows build
     instructions.
@@ -64,7 +90,13 @@ need the following software:
   If libcap-ng is installed, then Open vSwitch will automatically build with
   support for it.
 
-- Python 2.7. You must also have the Python ``six`` library.
+- Python 2.7. You must also have the Python ``six`` library version 1.4.0
+  or later.
+
+- Unbound library, from http://www.unbound.net, is optional but recommended if
+  you want to enable ovs-vswitchd and other utilities to use DNS names when
+  specifying OpenFlow and OVSDB remotes. If unbound library is already
+  installed, then Open vSwitch will automatically build with support for it.
 
 On Linux, you may choose to compile the kernel module that comes with the Open
 vSwitch distribution or to use the kernel module built into the Linux kernel
@@ -110,11 +142,6 @@ schema, you will also need the following software:
 
 - libtool version 2.4 or later. (Older versions might work too.)
 
-To run the unit tests, you also need:
-
-- Perl. Version 5.10.1 is known to work. Earlier versions should also
-  work.
-
 The datapath tests for userspace and Linux datapaths also rely upon:
 
 - pyftpdlib. Version 1.2.0 is known to work. Earlier versions should
@@ -129,19 +156,18 @@ The datapath tests for userspace and Linux datapaths also rely upon:
 
 - tftpy. Version 0.6.2 is known to work. Earlier versions should also work.
 
+- netstat.  Available from various distro specific packages
+
 The ovs-vswitchd.conf.db(5) manpage will include an E-R diagram, in formats
 other than plain text, only if you have the following:
 
 - dot from graphviz (http://www.graphviz.org/).
 
-- Perl. Version 5.10.1 is known to work. Earlier versions should also
-  work.
-
 If you are going to extensively modify Open vSwitch, consider installing the
 following to obtain better warnings:
 
-- "sparse" version 0.4.4 or later
-  (https://www.kernel.org/pub/software/devel/sparse/dist/).
+- "sparse" version 0.5.1 or later
+  (https://git.kernel.org/pub/scm/devel/sparse/sparse.git/).
 
 - GNU make.
 
@@ -162,18 +188,21 @@ Installation Requirements
 The machine you build Open vSwitch on may not be the one you run it on. To
 simply install and run Open vSwitch you require the following software:
 
-- libc compatible with the libc used for build.
+- Shared libraries compatible with those used for the build.
 
-- libssl compatible with the libssl used for build, if OpenSSL was used
-  for the build.
-
-- On Linux, the same kernel version configured as part of the build.
+- On Linux, if you want to use the kernel-based datapath (which is the most
+  common use case), then a kernel with a compatible kernel module.  This
+  can be a kernel module built with Open vSwitch (e.g. in the previous
+  step), or the kernel module that accompanies Linux 3.3 and later.  Open
+  vSwitch features and performance can vary based on the module and the
+  kernel.  Refer to :doc:`/faq/releases` for more information.
 
 - For optional support of ingress policing on Linux, the "tc" program
   from iproute2 (part of all major distributions and available at
   https://wiki.linuxfoundation.org/networking/iproute2).
 
-- Python 2.7. You must also have the Python six library.
+- Python 2.7. You must also have the Python six library version 1.4.0
+  or later.
 
 On Linux you should ensure that ``/dev/urandom`` exists. To support TAP
 devices, you must also ensure that ``/dev/net/tun`` exists.
@@ -242,6 +271,12 @@ intrinsics can be used by passing ``-msse4.2``::
 
     $ ./configure CFLAGS="-g -O2 -msse4.2"`
 
+Also builtin popcnt instruction can be used to speedup the counting of the
+bits set in an integer. For example on X86_64 with POPCNT support, it can be
+enabled by passing ``-mpopcnt``::
+
+    $ ./configure CFLAGS="-g -O2 -mpopcnt"`
+
 If you are on a different processor and don't know what flags to choose, it is
 recommended to use ``-march=native`` settings::
 
@@ -283,6 +318,13 @@ generated by the build. For example::
 
     $ ./configure --enable-Werror
 
+If you're building with GCC, then, for improved warnings, install ``sparse``
+(see "Prerequisites") and enable it for the build by adding
+``--enable-sparse``.  Use this with ``--enable-Werror`` to avoid missing both
+compiler and ``sparse`` warnings, e.g.::
+
+    $ ./configure --enable-Werror --enable-sparse
+
 To build with gcov code coverage support, add ``--enable-coverage``::
 
     $ ./configure --enable-coverage
@@ -301,7 +343,7 @@ modules for more than one Linux version. For example::
     $ mkdir _gcc && (cd _gcc && ./configure CC=gcc)
     $ mkdir _clang && (cd _clang && ./configure CC=clang)
 
-Under certains loads the ovsdb-server and other components perform better when
+Under certain loads the ovsdb-server and other components perform better when
 using the jemalloc memory allocator, instead of the glibc memory allocator. If
 you wish to link with jemalloc add it to LIBS::
 
@@ -326,15 +368,13 @@ Building
        $ make -C _gcc
        $ make -C _clang
 
-   For improved warnings if you installed ``sparse`` (see "Prerequisites"), add
-   ``C=1`` to the command line.
-
    .. note::
      Some versions of Clang and ccache are not completely compatible. If you
      see unusual warnings when you use both together, consider disabling
      ccache.
 
-2. Consider running the testsuite. Refer to **Testing** for instructions.
+2. Consider running the testsuite. Refer to :doc:`/topics/testing` for
+   instructions.
 
 3. Run ``make install`` to install the executables and manpages into the
    running system, by default under ``/usr/local``::
@@ -391,10 +431,37 @@ Building
 Starting
 --------
 
-Before starting ovs-vswitchd itself, you need to start its configuration
-database, ovsdb-server. Each machine on which Open vSwitch is installed should
-run its own copy of ovsdb-server. Before ovsdb-server itself can be started,
-configure a database that it can use::
+On Unix-alike systems, such as BSDs and Linux, starting the Open vSwitch
+suite of daemons is a simple process.  Open vSwitch includes a shell script,
+and helpers, called ovs-ctl which automates much of the tasks for starting
+and stopping ovsdb-server, and ovs-vswitchd.  After installation, the daemons
+can be started by using the ovs-ctl utility.  This will take care to setup
+initial conditions, and start the daemons in the correct order.  The ovs-ctl
+utility is located in '$(pkgdatadir)/scripts', and defaults to
+'/usr/local/share/openvswitch/scripts'.  An example after install might be::
+
+    $ export PATH=$PATH:/usr/local/share/openvswitch/scripts
+    $ ovs-ctl start
+
+Additionally, the ovs-ctl script allows starting / stopping the daemons
+individually using specific options.  To start just the ovsdb-server::
+
+    $ export PATH=$PATH:/usr/local/share/openvswitch/scripts
+    $ ovs-ctl --no-ovs-vswitchd start
+
+Likewise, to start just the ovs-vswitchd::
+
+    $ export PATH=$PATH:/usr/local/share/openvswitch/scripts
+    $ ovs-ctl --no-ovsdb-server start
+
+Refer to ovs-ctl(8) for more information on ovs-ctl.
+
+In addition to using the automated script to start Open vSwitch, you may
+wish to manually start the various daemons. Before starting ovs-vswitchd
+itself, you need to start its configuration database, ovsdb-server. Each
+machine on which Open vSwitch is installed should run its own copy of
+ovsdb-server. Before ovsdb-server itself can be started, configure a
+database that it can use::
 
        $ mkdir -p /usr/local/etc/openvswitch
        $ ovsdb-tool create /usr/local/etc/openvswitch/conf.db \
@@ -447,6 +514,11 @@ Upgrading
 When you upgrade Open vSwitch from one version to another you should also
 upgrade the database schema:
 
+.. note::
+   The following manual steps may also be accomplished by using ovs-ctl to
+   stop and start the daemons after upgrade.  The ovs-ctl script will
+   automatically upgrade the schema.
+
 1. Stop the Open vSwitch daemons, e.g.::
 
        $ kill `cd /usr/local/var/run/openvswitch && cat ovsdb-server.pid ovs-vswitchd.pid`
@@ -468,7 +540,7 @@ upgrade the database schema:
           $ ovsdb-tool convert /usr/local/etc/openvswitch/conf.db \
               vswitchd/vswitch.ovsschema
 
-4. Start the Open vSwitch daemons as described under **Starting** above.
+4. Start the Open vSwitch daemons as described under `Starting`_ above.
 
 Hot Upgrading
 -------------

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,9 +21,11 @@
 #include "byte-order.h"
 #include "colors.h"
 #include "openvswitch/dynamic-string.h"
-#include "openvswitch/ofp-util.h"
+#include "openvswitch/meta-flow.h"
+#include "openvswitch/ofp-port.h"
 #include "packets.h"
 #include "tun-metadata.h"
+#include "openvswitch/nsh.h"
 
 /* Converts the flow in 'flow' into a match in 'match', with the given
  * 'wildcards'. */
@@ -279,6 +281,19 @@ match_set_tun_flags_masked(struct match *match, uint16_t flags, uint16_t mask)
 }
 
 void
+match_set_tun_tp_dst(struct match *match, ovs_be16 tp_dst)
+{
+    match_set_tun_tp_dst_masked(match, tp_dst, OVS_BE16_MAX);
+}
+
+void
+match_set_tun_tp_dst_masked(struct match *match, ovs_be16 port, ovs_be16 mask)
+{
+    match->wc.masks.tunnel.tp_dst = mask;
+    match->flow.tunnel.tp_dst = port & mask;
+}
+
+void
 match_set_tun_gbp_id_masked(struct match *match, ovs_be16 gbp_id, ovs_be16 mask)
 {
     match->wc.masks.tunnel.gbp_id = mask;
@@ -302,6 +317,61 @@ void
 match_set_tun_gbp_flags(struct match *match, uint8_t flags)
 {
     match_set_tun_gbp_flags_masked(match, flags, UINT8_MAX);
+}
+
+void
+match_set_tun_erspan_ver_masked(struct match *match, uint8_t ver, uint8_t mask)
+{
+    match->wc.masks.tunnel.erspan_ver = ver;
+    match->flow.tunnel.erspan_ver = ver & mask;
+}
+
+void
+match_set_tun_erspan_ver(struct match *match, uint8_t ver)
+{
+    match_set_tun_erspan_ver_masked(match, ver, UINT8_MAX);
+}
+
+void
+match_set_tun_erspan_idx_masked(struct match *match, uint32_t erspan_idx,
+                                uint32_t mask)
+{
+    match->wc.masks.tunnel.erspan_idx = mask;
+    match->flow.tunnel.erspan_idx = erspan_idx & mask;
+}
+
+void
+match_set_tun_erspan_idx(struct match *match, uint32_t erspan_idx)
+{
+    match_set_tun_erspan_idx_masked(match, erspan_idx, UINT32_MAX);
+}
+
+void
+match_set_tun_erspan_dir_masked(struct match *match, uint8_t dir,
+                                uint8_t mask)
+{
+    match->wc.masks.tunnel.erspan_dir = dir;
+    match->flow.tunnel.erspan_dir = dir & mask;
+}
+
+void
+match_set_tun_erspan_dir(struct match *match, uint8_t dir)
+{
+    match_set_tun_erspan_dir_masked(match, dir, UINT8_MAX);
+}
+
+void
+match_set_tun_erspan_hwid_masked(struct match *match, uint8_t hwid,
+                                 uint8_t mask)
+{
+    match->wc.masks.tunnel.erspan_hwid = hwid;
+    match->flow.tunnel.erspan_hwid = hwid & mask;
+}
+
+void
+match_set_tun_erspan_hwid(struct match *match, uint8_t hwid)
+{
+    match_set_tun_erspan_hwid_masked(match, hwid, UINT8_MAX);
 }
 
 void
@@ -477,6 +547,56 @@ match_set_ct_ipv6_dst_masked(struct match *match, const struct in6_addr *dst,
 }
 
 void
+match_set_packet_type(struct match *match, ovs_be32 packet_type)
+{
+    match->flow.packet_type = packet_type;
+    match->wc.masks.packet_type = OVS_BE32_MAX;
+}
+
+/* If 'match' does not match on any packet type, make it match on Ethernet
+ * packets (the default packet type, as specified by OpenFlow). */
+void
+match_set_default_packet_type(struct match *match)
+{
+    if (!match->wc.masks.packet_type) {
+        match_set_packet_type(match, htonl(PT_ETH));
+    }
+}
+
+/* Returns true if 'match' matches only Ethernet packets (the default packet
+ * type, as specified by OpenFlow). */
+bool
+match_has_default_packet_type(const struct match *match)
+{
+    return (match->flow.packet_type == htonl(PT_ETH)
+            && match->wc.masks.packet_type == OVS_BE32_MAX);
+}
+
+/* A match on 'field' is being added to or has been added to 'match'.  If
+ * 'field' is a data field, and 'match' does not already match on packet_type,
+ * this function make it match on the Ethernet packet_type.
+ *
+ * This function is useful because OpenFlow implicitly applies to Ethernet
+ * packets when there's no explicit packet_type, but matching on a metadata
+ * field doesn't imply anything about the packet_type and falsely inferring
+ * that it does can cause harm.  A flow that matches only on metadata fields,
+ * for example, should be able to match more than just Ethernet flows.  There
+ * are also important reasons that a catch-all match (one with no field matches
+ * at all) should not imply a packet_type(0,0) match.  For example, a "flow
+ * dump" request that matches on no fields should return every flow in the
+ * switch, not just the flows that match on Ethernet.  As a second example,
+ * OpenFlow 1.2+ special-cases "table miss" flows, that is catch-all flows with
+ * priority 0, and inferring a match on packet_type(0,0) causes such a flow not
+ * to be a table miss flow.  */
+void
+match_add_ethernet_prereq(struct match *match, const struct mf_field *field)
+{
+    if (field->prereqs != MFP_NONE) {
+        match_set_default_packet_type(match);
+    }
+}
+
+void
 match_set_dl_type(struct match *match, ovs_be16 dl_type)
 {
     match->wc.masks.dl_type = OVS_BE16_MAX;
@@ -558,8 +678,8 @@ match_set_dl_tci(struct match *match, ovs_be16 tci)
 void
 match_set_dl_tci_masked(struct match *match, ovs_be16 tci, ovs_be16 mask)
 {
-    match->flow.vlan_tci = tci & mask;
-    match->wc.masks.vlan_tci = mask;
+    match->flow.vlans[0].tci = tci & mask;
+    match->wc.masks.vlans[0].tci = mask;
 }
 
 /* Modifies 'match' so that the VLAN VID is wildcarded.  If the PCP is already
@@ -568,9 +688,9 @@ match_set_dl_tci_masked(struct match *match, ovs_be16 tci, ovs_be16 mask)
 void
 match_set_any_vid(struct match *match)
 {
-    if (match->wc.masks.vlan_tci & htons(VLAN_PCP_MASK)) {
-        match->wc.masks.vlan_tci &= ~htons(VLAN_VID_MASK);
-        match->flow.vlan_tci &= ~htons(VLAN_VID_MASK);
+    if (match->wc.masks.vlans[0].tci & htons(VLAN_PCP_MASK)) {
+        match->wc.masks.vlans[0].tci &= ~htons(VLAN_VID_MASK);
+        match->flow.vlans[0].tci &= ~htons(VLAN_VID_MASK);
     } else {
         match_set_dl_tci_masked(match, htons(0), htons(0));
     }
@@ -585,13 +705,13 @@ match_set_any_vid(struct match *match)
  *     VID equals the low 12 bits of 'dl_vlan'.
  */
 void
-match_set_dl_vlan(struct match *match, ovs_be16 dl_vlan)
+match_set_dl_vlan(struct match *match, ovs_be16 dl_vlan, int id)
 {
-    flow_set_dl_vlan(&match->flow, dl_vlan);
+    flow_set_dl_vlan(&match->flow, dl_vlan, id);
     if (dl_vlan == htons(OFP10_VLAN_NONE)) {
-        match->wc.masks.vlan_tci = OVS_BE16_MAX;
+        match->wc.masks.vlans[id].tci = OVS_BE16_MAX;
     } else {
-        match->wc.masks.vlan_tci |= htons(VLAN_VID_MASK | VLAN_CFI);
+        match->wc.masks.vlans[id].tci |= htons(VLAN_VID_MASK | VLAN_CFI);
     }
 }
 
@@ -616,7 +736,8 @@ match_set_vlan_vid_masked(struct match *match, ovs_be16 vid, ovs_be16 mask)
 
     mask &= vid_mask;
     flow_set_vlan_vid(&match->flow, vid & mask);
-    match->wc.masks.vlan_tci = mask | (match->wc.masks.vlan_tci & pcp_mask);
+    match->wc.masks.vlans[0].tci =
+        mask | (match->wc.masks.vlans[0].tci & pcp_mask);
 }
 
 /* Modifies 'match' so that the VLAN PCP is wildcarded.  If the VID is already
@@ -625,9 +746,9 @@ match_set_vlan_vid_masked(struct match *match, ovs_be16 vid, ovs_be16 mask)
 void
 match_set_any_pcp(struct match *match)
 {
-    if (match->wc.masks.vlan_tci & htons(VLAN_VID_MASK)) {
-        match->wc.masks.vlan_tci &= ~htons(VLAN_PCP_MASK);
-        match->flow.vlan_tci &= ~htons(VLAN_PCP_MASK);
+    if (match->wc.masks.vlans[0].tci & htons(VLAN_VID_MASK)) {
+        match->wc.masks.vlans[0].tci &= ~htons(VLAN_PCP_MASK);
+        match->flow.vlans[0].tci &= ~htons(VLAN_PCP_MASK);
     } else {
         match_set_dl_tci_masked(match, htons(0), htons(0));
     }
@@ -636,10 +757,10 @@ match_set_any_pcp(struct match *match)
 /* Modifies 'match' so that it matches only packets with an 802.1Q header whose
  * PCP equals the low 3 bits of 'dl_vlan_pcp'. */
 void
-match_set_dl_vlan_pcp(struct match *match, uint8_t dl_vlan_pcp)
+match_set_dl_vlan_pcp(struct match *match, uint8_t dl_vlan_pcp, int id)
 {
-    flow_set_vlan_pcp(&match->flow, dl_vlan_pcp);
-    match->wc.masks.vlan_tci |= htons(VLAN_CFI | VLAN_PCP_MASK);
+    flow_set_vlan_pcp(&match->flow, dl_vlan_pcp, id);
+    match->wc.masks.vlans[id].tci |= htons(VLAN_CFI | VLAN_PCP_MASK);
 }
 
 /* Modifies 'match' so that the MPLS label 'idx' matches 'lse' exactly. */
@@ -822,6 +943,20 @@ match_set_nw_ttl(struct match *match, uint8_t nw_ttl)
 {
     match->wc.masks.nw_ttl = UINT8_MAX;
     match->flow.nw_ttl = nw_ttl;
+}
+
+void
+match_set_nw_tos_masked(struct match *match, uint8_t nw_tos, uint8_t mask)
+{
+    match->flow.nw_tos = nw_tos & mask;
+    match->wc.masks.nw_tos = mask;
+}
+
+void
+match_set_nw_ttl_masked(struct match *match, uint8_t nw_ttl, uint8_t mask)
+{
+    match->flow.nw_ttl = nw_ttl & mask;
+    match->wc.masks.nw_ttl = mask;
 }
 
 void
@@ -1025,6 +1160,21 @@ format_ipv6_netmask(struct ds *s, const char *name,
 }
 
 static void
+format_uint8_masked(struct ds *s, const char *name,
+                   uint8_t value, uint8_t mask)
+{
+    if (mask != 0) {
+        ds_put_format(s, "%s%s=%s", colors.param, name, colors.end);
+        if (mask == UINT8_MAX) {
+            ds_put_format(s, "%"PRIu8, value);
+        } else {
+            ds_put_format(s, "0x%02"PRIx8"/0x%02"PRIx8, value, mask);
+        }
+        ds_put_char(s, ',');
+    }
+}
+
+static void
 format_uint16_masked(struct ds *s, const char *name,
                    uint16_t value, uint16_t mask)
 {
@@ -1063,6 +1213,22 @@ format_be32_masked(struct ds *s, const char *name,
         ds_put_format(s, "%s%s=%s", colors.param, name, colors.end);
         if (mask == OVS_BE32_MAX) {
             ds_put_format(s, "%"PRIu32, ntohl(value));
+        } else {
+            ds_put_format(s, "0x%08"PRIx32"/0x%08"PRIx32,
+                          ntohl(value), ntohl(mask));
+        }
+        ds_put_char(s, ',');
+    }
+}
+
+static void
+format_be32_masked_hex(struct ds *s, const char *name,
+                       ovs_be32 value, ovs_be32 mask)
+{
+    if (mask != htonl(0)) {
+        ds_put_format(s, "%s%s=%s", colors.param, name, colors.end);
+        if (mask == OVS_BE32_MAX) {
+            ds_put_format(s, "0x%"PRIx32, ntohl(value));
         } else {
             ds_put_format(s, "0x%"PRIx32"/0x%"PRIx32,
                           ntohl(value), ntohl(mask));
@@ -1128,6 +1294,18 @@ format_flow_tunnel(struct ds *s, const struct match *match)
     if (wc->masks.tunnel.ip_ttl) {
         ds_put_format(s, "tun_ttl=%"PRIu8",", tnl->ip_ttl);
     }
+    if (wc->masks.tunnel.erspan_ver) {
+        ds_put_format(s, "tun_erspan_ver=%"PRIu8",", tnl->erspan_ver);
+    }
+    if (wc->masks.tunnel.erspan_idx && tnl->erspan_ver == 1) {
+       ds_put_format(s, "tun_erspan_idx=%#"PRIx32",", tnl->erspan_idx); 
+    }
+    if (wc->masks.tunnel.erspan_dir && tnl->erspan_ver == 2) {
+        ds_put_format(s, "tun_erspan_dir=%"PRIu8",", tnl->erspan_dir);
+    }
+    if (wc->masks.tunnel.erspan_hwid && tnl->erspan_ver == 2) {
+        ds_put_format(s, "tun_erspan_hwid=%#"PRIx8",", tnl->erspan_hwid);
+    }
     if (wc->masks.tunnel.flags & FLOW_TNL_F_MASK) {
         format_flags_masked(s, "tun_flags", flow_tun_flag_to_string,
                             tnl->flags & FLOW_TNL_F_MASK,
@@ -1154,21 +1332,52 @@ format_ct_label_masked(struct ds *s, const ovs_u128 *key, const ovs_u128 *mask)
     }
 }
 
+static void
+format_nsh_masked(struct ds *s, const struct flow *f, const struct flow *m)
+{
+    ovs_be32 spi_mask = nsh_path_hdr_to_spi(m->nsh.path_hdr);
+    if (spi_mask == htonl(NSH_SPI_MASK >> NSH_SPI_SHIFT)) {
+        spi_mask = OVS_BE32_MAX;
+    }
+    format_uint8_masked(s, "nsh_flags", f->nsh.flags, m->nsh.flags);
+    format_uint8_masked(s, "nsh_ttl", f->nsh.ttl, m->nsh.ttl);
+    format_uint8_masked(s, "nsh_mdtype", f->nsh.mdtype, m->nsh.mdtype);
+    format_uint8_masked(s, "nsh_np", f->nsh.np, m->nsh.np);
+
+    format_be32_masked_hex(s, "nsh_spi", nsh_path_hdr_to_spi(f->nsh.path_hdr),
+                           spi_mask);
+    format_uint8_masked(s, "nsh_si", nsh_path_hdr_to_si(f->nsh.path_hdr),
+                        nsh_path_hdr_to_si(m->nsh.path_hdr));
+    if (m->nsh.mdtype == UINT8_MAX && f->nsh.mdtype == NSH_M_TYPE1) {
+        format_be32_masked_hex(s, "nsh_c1", f->nsh.context[0],
+                               m->nsh.context[0]);
+        format_be32_masked_hex(s, "nsh_c2", f->nsh.context[1],
+                               m->nsh.context[1]);
+        format_be32_masked_hex(s, "nsh_c3", f->nsh.context[2],
+                               m->nsh.context[2]);
+        format_be32_masked_hex(s, "nsh_c4", f->nsh.context[3],
+                               m->nsh.context[3]);
+    }
+}
+
 /* Appends a string representation of 'match' to 's'.  If 'priority' is
- * different from OFP_DEFAULT_PRIORITY, includes it in 's'. */
+ * different from OFP_DEFAULT_PRIORITY, includes it in 's'.  If 'port_map' is
+ * nonnull, uses it to translate port numbers to names in output. */
 void
-match_format(const struct match *match, struct ds *s, int priority)
+match_format(const struct match *match,
+             const struct ofputil_port_map *port_map,
+             struct ds *s, int priority)
 {
     const struct flow_wildcards *wc = &match->wc;
     size_t start_len = s->length;
     const struct flow *f = &match->flow;
     bool skip_type = false;
-
     bool skip_proto = false;
-
+    ovs_be16 dl_type = f->dl_type;
+    bool is_megaflow = false;
     int i;
 
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 37);
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 41);
 
     if (priority != OFP_DEFAULT_PRIORITY) {
         ds_put_format(s, "%spriority=%s%d,",
@@ -1180,6 +1389,7 @@ match_format(const struct match *match, struct ds *s, int priority)
     if (wc->masks.recirc_id) {
         format_uint32_masked(s, "recirc_id", f->recirc_id,
                              wc->masks.recirc_id);
+        is_megaflow = true;
     }
 
     if (wc->masks.dp_hash) {
@@ -1199,7 +1409,7 @@ match_format(const struct match *match, struct ds *s, int priority)
 
     if (wc->masks.actset_output) {
         ds_put_format(s, "%sactset_output=%s", colors.param, colors.end);
-        ofputil_format_port(f->actset_output, s);
+        ofputil_format_port(f->actset_output, port_map, s);
         ds_put_char(s, ',');
     }
 
@@ -1245,9 +1455,18 @@ match_format(const struct match *match, struct ds *s, int priority)
         format_be16_masked(s, "ct_tp_dst", f->ct_tp_dst, wc->masks.ct_tp_dst);
     }
 
+    if (wc->masks.packet_type &&
+        (!match_has_default_packet_type(match) || is_megaflow)) {
+        format_packet_type_masked(s, f->packet_type, wc->masks.packet_type);
+        ds_put_char(s, ',');
+        if (pt_ns(f->packet_type) == OFPHTN_ETHERTYPE) {
+            dl_type = pt_ns_type_be(f->packet_type);
+        }
+    }
+
     if (wc->masks.dl_type) {
         skip_type = true;
-        if (f->dl_type == htons(ETH_TYPE_IP)) {
+        if (dl_type == htons(ETH_TYPE_IP)) {
             if (wc->masks.nw_proto) {
                 skip_proto = true;
                 if (f->nw_proto == IPPROTO_ICMP) {
@@ -1267,7 +1486,7 @@ match_format(const struct match *match, struct ds *s, int priority)
             } else {
                 ds_put_format(s, "%sip%s,", colors.value, colors.end);
             }
-        } else if (f->dl_type == htons(ETH_TYPE_IPV6)) {
+        } else if (dl_type == htons(ETH_TYPE_IPV6)) {
             if (wc->masks.nw_proto) {
                 skip_proto = true;
                 if (f->nw_proto == IPPROTO_ICMPV6) {
@@ -1285,13 +1504,13 @@ match_format(const struct match *match, struct ds *s, int priority)
             } else {
                 ds_put_format(s, "%sipv6%s,", colors.value, colors.end);
             }
-        } else if (f->dl_type == htons(ETH_TYPE_ARP)) {
+        } else if (dl_type == htons(ETH_TYPE_ARP)) {
             ds_put_format(s, "%sarp%s,", colors.value, colors.end);
-        } else if (f->dl_type == htons(ETH_TYPE_RARP)) {
+        } else if (dl_type == htons(ETH_TYPE_RARP)) {
             ds_put_format(s, "%srarp%s,", colors.value, colors.end);
-        } else if (f->dl_type == htons(ETH_TYPE_MPLS)) {
+        } else if (dl_type == htons(ETH_TYPE_MPLS)) {
             ds_put_format(s, "%smpls%s,", colors.value, colors.end);
-        } else if (f->dl_type == htons(ETH_TYPE_MPLS_MCAST)) {
+        } else if (dl_type == htons(ETH_TYPE_MPLS_MCAST)) {
             ds_put_format(s, "%smplsm%s,", colors.value, colors.end);
         } else {
             skip_type = false;
@@ -1312,42 +1531,60 @@ match_format(const struct match *match, struct ds *s, int priority)
 
     if (wc->masks.in_port.ofp_port) {
         ds_put_format(s, "%sin_port=%s", colors.param, colors.end);
-        ofputil_format_port(f->in_port.ofp_port, s);
+        ofputil_format_port(f->in_port.ofp_port, port_map, s);
         ds_put_char(s, ',');
     }
-    if (wc->masks.vlan_tci) {
-        ovs_be16 vid_mask = wc->masks.vlan_tci & htons(VLAN_VID_MASK);
-        ovs_be16 pcp_mask = wc->masks.vlan_tci & htons(VLAN_PCP_MASK);
-        ovs_be16 cfi = wc->masks.vlan_tci & htons(VLAN_CFI);
+    for (i = 0; i < FLOW_MAX_VLAN_HEADERS; i++) {
+        char str_i[8];
 
-        if (cfi && f->vlan_tci & htons(VLAN_CFI)
+        if (!wc->masks.vlans[i].tci) {
+            break;
+        }
+
+        /* Print VLAN tags as dl_vlan, dl_vlan1, dl_vlan2 ... */
+        if (i == 0) {
+            str_i[0] = '\0';
+        } else {
+            snprintf(str_i, sizeof(str_i), "%d", i);
+        }
+        ovs_be16 vid_mask = wc->masks.vlans[i].tci & htons(VLAN_VID_MASK);
+        ovs_be16 pcp_mask = wc->masks.vlans[i].tci & htons(VLAN_PCP_MASK);
+        ovs_be16 cfi = wc->masks.vlans[i].tci & htons(VLAN_CFI);
+
+        if (cfi && f->vlans[i].tci & htons(VLAN_CFI)
             && (!vid_mask || vid_mask == htons(VLAN_VID_MASK))
             && (!pcp_mask || pcp_mask == htons(VLAN_PCP_MASK))
             && (vid_mask || pcp_mask)) {
             if (vid_mask) {
-                ds_put_format(s, "%sdl_vlan=%s%"PRIu16",", colors.param,
-                              colors.end, vlan_tci_to_vid(f->vlan_tci));
+                ds_put_format(s, "%sdl_vlan%s=%s%"PRIu16",",
+                              colors.param, str_i, colors.end,
+                              vlan_tci_to_vid(f->vlans[i].tci));
             }
             if (pcp_mask) {
-                ds_put_format(s, "%sdl_vlan_pcp=%s%d,", colors.param,
-                              colors.end, vlan_tci_to_pcp(f->vlan_tci));
+                ds_put_format(s, "%sdl_vlan_pcp%s=%s%d,",
+                              colors.param, str_i, colors.end,
+                              vlan_tci_to_pcp(f->vlans[i].tci));
             }
-        } else if (wc->masks.vlan_tci == htons(0xffff)) {
-            ds_put_format(s, "%svlan_tci=%s0x%04"PRIx16",", colors.param,
-                          colors.end, ntohs(f->vlan_tci));
+        } else if (wc->masks.vlans[i].tci == htons(0xffff)) {
+            ds_put_format(s, "%svlan_tci%s=%s0x%04"PRIx16",",
+                          colors.param, str_i, colors.end,
+                          ntohs(f->vlans[i].tci));
         } else {
-            ds_put_format(s, "%svlan_tci=%s0x%04"PRIx16"/0x%04"PRIx16",",
-                          colors.param, colors.end,
-                          ntohs(f->vlan_tci), ntohs(wc->masks.vlan_tci));
+            ds_put_format(s, "%svlan_tci%s=%s0x%04"PRIx16"/0x%04"PRIx16",",
+                          colors.param, str_i, colors.end,
+                          ntohs(f->vlans[i].tci),
+                          ntohs(wc->masks.vlans[i].tci));
         }
     }
+
     format_eth_masked(s, "dl_src", f->dl_src, wc->masks.dl_src);
     format_eth_masked(s, "dl_dst", f->dl_dst, wc->masks.dl_dst);
+
     if (!skip_type && wc->masks.dl_type) {
         ds_put_format(s, "%sdl_type=%s0x%04"PRIx16",",
-                      colors.param, colors.end, ntohs(f->dl_type));
+                      colors.param, colors.end, ntohs(dl_type));
     }
-    if (f->dl_type == htons(ETH_TYPE_IPV6)) {
+    if (dl_type == htons(ETH_TYPE_IPV6)) {
         format_ipv6_netmask(s, "ipv6_src", &f->ipv6_src, &wc->masks.ipv6_src);
         format_ipv6_netmask(s, "ipv6_dst", &f->ipv6_dst, &wc->masks.ipv6_dst);
         if (wc->masks.ipv6_label) {
@@ -1361,17 +1598,19 @@ match_format(const struct match *match, struct ds *s, int priority)
                               ntohl(wc->masks.ipv6_label));
             }
         }
-    } else if (f->dl_type == htons(ETH_TYPE_ARP) ||
-               f->dl_type == htons(ETH_TYPE_RARP)) {
+    } else if (dl_type == htons(ETH_TYPE_ARP) ||
+               dl_type == htons(ETH_TYPE_RARP)) {
         format_ip_netmask(s, "arp_spa", f->nw_src, wc->masks.nw_src);
         format_ip_netmask(s, "arp_tpa", f->nw_dst, wc->masks.nw_dst);
+    } else if (dl_type == htons(ETH_TYPE_NSH)) {
+        format_nsh_masked(s, f, &wc->masks);
     } else {
         format_ip_netmask(s, "nw_src", f->nw_src, wc->masks.nw_src);
         format_ip_netmask(s, "nw_dst", f->nw_dst, wc->masks.nw_dst);
     }
     if (!skip_proto && wc->masks.nw_proto) {
-        if (f->dl_type == htons(ETH_TYPE_ARP) ||
-            f->dl_type == htons(ETH_TYPE_RARP)) {
+        if (dl_type == htons(ETH_TYPE_ARP) ||
+            dl_type == htons(ETH_TYPE_RARP)) {
             ds_put_format(s, "%sarp_op=%s%"PRIu8",",
                           colors.param, colors.end, f->nw_proto);
         } else {
@@ -1379,21 +1618,21 @@ match_format(const struct match *match, struct ds *s, int priority)
                           colors.param, colors.end, f->nw_proto);
         }
     }
-    if (f->dl_type == htons(ETH_TYPE_ARP) ||
-        f->dl_type == htons(ETH_TYPE_RARP)) {
+    if (dl_type == htons(ETH_TYPE_ARP) ||
+        dl_type == htons(ETH_TYPE_RARP)) {
         format_eth_masked(s, "arp_sha", f->arp_sha, wc->masks.arp_sha);
         format_eth_masked(s, "arp_tha", f->arp_tha, wc->masks.arp_tha);
     }
     if (wc->masks.nw_tos & IP_DSCP_MASK) {
-        ds_put_format(s, "%snw_tos=%s%"PRIu8",",
+        ds_put_format(s, "%snw_tos=%s%d,",
                       colors.param, colors.end, f->nw_tos & IP_DSCP_MASK);
     }
     if (wc->masks.nw_tos & IP_ECN_MASK) {
-        ds_put_format(s, "%snw_ecn=%s%"PRIu8",",
+        ds_put_format(s, "%snw_ecn=%s%d,",
                       colors.param, colors.end, f->nw_tos & IP_ECN_MASK);
     }
     if (wc->masks.nw_ttl) {
-        ds_put_format(s, "%snw_ttl=%s%"PRIu8",",
+        ds_put_format(s, "%snw_ttl=%s%d,",
                       colors.param, colors.end, f->nw_ttl);
     }
     if (wc->masks.mpls_lse[0] & htonl(MPLS_LABEL_MASK)) {
@@ -1433,15 +1672,15 @@ match_format(const struct match *match, struct ds *s, int priority)
                       f->nw_frag & FLOW_NW_FRAG_LATER ? "later" : "not_later");
         break;
     }
-    if (f->dl_type == htons(ETH_TYPE_IP) &&
+    if (dl_type == htons(ETH_TYPE_IP) &&
         f->nw_proto == IPPROTO_ICMP) {
         format_be16_masked(s, "icmp_type", f->tp_src, wc->masks.tp_src);
         format_be16_masked(s, "icmp_code", f->tp_dst, wc->masks.tp_dst);
-    } else if (f->dl_type == htons(ETH_TYPE_IP) &&
+    } else if (dl_type == htons(ETH_TYPE_IP) &&
                f->nw_proto == IPPROTO_IGMP) {
         format_be16_masked(s, "igmp_type", f->tp_src, wc->masks.tp_src);
         format_be16_masked(s, "igmp_code", f->tp_dst, wc->masks.tp_dst);
-    } else if (f->dl_type == htons(ETH_TYPE_IPV6) &&
+    } else if (dl_type == htons(ETH_TYPE_IPV6) &&
                f->nw_proto == IPPROTO_ICMPV6) {
         format_be16_masked(s, "icmp_type", f->tp_src, wc->masks.tp_src);
         format_be16_masked(s, "icmp_code", f->tp_dst, wc->masks.tp_dst);
@@ -1465,20 +1704,23 @@ match_format(const struct match *match, struct ds *s, int priority)
 }
 
 /* Converts 'match' to a string and returns the string.  If 'priority' is
- * different from OFP_DEFAULT_PRIORITY, includes it in the string.  The caller
- * must free the string (with free()). */
+ * different from OFP_DEFAULT_PRIORITY, includes it in the string.  If
+ * 'port_map' is nonnull, uses it to translate port numbers to names in
+ * output.  The caller must free the string (with free()). */
 char *
-match_to_string(const struct match *match, int priority)
+match_to_string(const struct match *match,
+                const struct ofputil_port_map *port_map, int priority)
 {
     struct ds s = DS_EMPTY_INITIALIZER;
-    match_format(match, &s, priority);
+    match_format(match, port_map, &s, priority);
     return ds_steal_cstr(&s);
 }
 
 void
-match_print(const struct match *match)
+match_print(const struct match *match,
+            const struct ofputil_port_map *port_map)
 {
-    char *s = match_to_string(match, OFP_DEFAULT_PRIORITY);
+    char *s = match_to_string(match, port_map, OFP_DEFAULT_PRIORITY);
     puts(s);
     free(s);
 }
@@ -1495,6 +1737,17 @@ minimatch_init(struct minimatch *dst, const struct match *src)
     miniflow_alloc(dst->flows, 2, &tmp);
     miniflow_init(dst->flow, &src->flow);
     minimask_init(dst->mask, &src->wc);
+
+    dst->tun_md = tun_metadata_allocation_clone(&src->tun_md);
+}
+
+/* Initializes 'match' as a "catch-all" match that matches every packet. */
+void
+minimatch_init_catchall(struct minimatch *match)
+{
+    match->flows[0] = xcalloc(2, sizeof *match->flow);
+    match->flows[1] = match->flows[0] + 1;
+    match->tun_md = NULL;
 }
 
 /* Initializes 'dst' as a copy of 'src'.  The caller must eventually free 'dst'
@@ -1509,6 +1762,7 @@ minimatch_clone(struct minimatch *dst, const struct minimatch *src)
            miniflow_get_values(src->flow), data_size);
     memcpy(miniflow_values(&dst->mask->masks),
            miniflow_get_values(&src->mask->masks), data_size);
+    dst->tun_md = tun_metadata_allocation_clone(src->tun_md);
 }
 
 /* Initializes 'dst' with the data in 'src', destroying 'src'.  The caller must
@@ -1518,6 +1772,7 @@ minimatch_move(struct minimatch *dst, struct minimatch *src)
 {
     dst->flow = src->flow;
     dst->mask = src->mask;
+    dst->tun_md = src->tun_md;
 }
 
 /* Frees any memory owned by 'match'.  Does not free the storage in which
@@ -1526,6 +1781,7 @@ void
 minimatch_destroy(struct minimatch *match)
 {
     free(match->flow);
+    free(match->tun_md);
 }
 
 /* Initializes 'dst' as a copy of 'src'. */
@@ -1534,7 +1790,7 @@ minimatch_expand(const struct minimatch *src, struct match *dst)
 {
     miniflow_expand(src->flow, &dst->flow);
     minimask_expand(src->mask, &dst->wc);
-    memset(&dst->tun_md, 0, sizeof dst->tun_md);
+    tun_metadata_allocation_copy(&dst->tun_md, src->tun_md);
 }
 
 /* Returns true if 'a' and 'b' match the same packets, false otherwise.  */
@@ -1543,6 +1799,16 @@ minimatch_equal(const struct minimatch *a, const struct minimatch *b)
 {
     return minimask_equal(a->mask, b->mask)
         && miniflow_equal(a->flow, b->flow);
+}
+
+/* Returns a hash value for the flow and wildcards in 'match', starting from
+ * 'basis'. */
+uint32_t
+minimatch_hash(const struct minimatch *match, uint32_t basis)
+{
+    size_t n_values = miniflow_n_values(match->flow);
+    size_t flow_size = sizeof *match->flow + MINIFLOW_VALUES_SIZE(n_values);
+    return hash_bytes(match->flow, 2 * flow_size, basis);
 }
 
 /* Returns true if 'target' satisifies 'match', that is, if each bit for which
@@ -1569,27 +1835,57 @@ minimatch_matches_flow(const struct minimatch *match,
 }
 
 /* Appends a string representation of 'match' to 's'.  If 'priority' is
- * different from OFP_DEFAULT_PRIORITY, includes it in 's'. */
+ * different from OFP_DEFAULT_PRIORITY, includes it in 's'.  If 'port_map' is
+ * nonnull, uses it to translate port numbers to names in output. */
 void
 minimatch_format(const struct minimatch *match,
-                 const struct tun_table *tun_table,struct ds *s, int priority)
+                 const struct tun_table *tun_table,
+                 const struct ofputil_port_map *port_map,
+                 struct ds *s, int priority)
 {
     struct match megamatch;
 
     minimatch_expand(match, &megamatch);
     megamatch.flow.tunnel.metadata.tab = tun_table;
 
-    match_format(&megamatch, s, priority);
+    match_format(&megamatch, port_map, s, priority);
 }
 
 /* Converts 'match' to a string and returns the string.  If 'priority' is
  * different from OFP_DEFAULT_PRIORITY, includes it in the string.  The caller
- * must free the string (with free()). */
+ * must free the string (with free()).  If 'port_map' is nonnull, uses it to
+ * translate port numbers to names in output. */
 char *
-minimatch_to_string(const struct minimatch *match, int priority)
+minimatch_to_string(const struct minimatch *match,
+                    const struct ofputil_port_map *port_map, int priority)
 {
     struct match megamatch;
 
     minimatch_expand(match, &megamatch);
-    return match_to_string(&megamatch, priority);
+    return match_to_string(&megamatch, port_map, priority);
+}
+
+static bool
+minimatch_has_default_recirc_id(const struct minimatch *m)
+{
+    uint32_t flow_recirc_id = miniflow_get_recirc_id(m->flow);
+    uint32_t mask_recirc_id = miniflow_get_recirc_id(&m->mask->masks);
+    return flow_recirc_id == 0 && (mask_recirc_id == UINT32_MAX ||
+                                   mask_recirc_id == 0);
+}
+
+static bool
+minimatch_has_default_dp_hash(const struct minimatch *m)
+{
+    return (!miniflow_get_dp_hash(m->flow)
+            && !miniflow_get_dp_hash(&m->mask->masks));
+}
+
+/* Return true if the hidden fields of the match are set to the default values.
+ * The default values equals to those set up by match_init_hidden_fields(). */
+bool
+minimatch_has_default_hidden_fields(const struct minimatch *m)
+{
+    return (minimatch_has_default_recirc_id(m)
+            && minimatch_has_default_dp_hash(m));
 }

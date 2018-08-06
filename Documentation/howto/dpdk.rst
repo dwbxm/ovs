@@ -29,8 +29,10 @@ This document describes how to use Open vSwitch with DPDK datapath.
 
 .. important::
 
-   Using the DPDK datapath requires building OVS with DPDK support. Refer to
-   :doc:`/intro/install/dpdk` for more information.
+   Using the DPDK datapath requires building OVS with DPDK support. The
+   mapping of OVS version to DPDK can vary between releases. For version
+   mapping information refer to :doc:`releases FAQ </faq/releases>`. For
+   build instructions refer to :doc:`/intro/install/dpdk`.
 
 Ports and Bridges
 -----------------
@@ -47,6 +49,22 @@ number of dpdk devices found in the log file::
         options:dpdk-devargs=0000:01:00.0
     $ ovs-vsctl add-port br0 dpdk-p1 -- set Interface dpdk-p1 type=dpdk \
         options:dpdk-devargs=0000:01:00.1
+
+Some NICs (i.e. Mellanox ConnectX-3) have only one PCI address associated with
+multiple ports. Using a PCI device like above won't work. Instead, below usage
+is suggested::
+
+    $ ovs-vsctl add-port br0 dpdk-p0 -- set Interface dpdk-p0 type=dpdk \
+        options:dpdk-devargs="class=eth,mac=00:11:22:33:44:55"
+    $ ovs-vsctl add-port br0 dpdk-p1 -- set Interface dpdk-p1 type=dpdk \
+        options:dpdk-devargs="class=eth,mac=00:11:22:33:44:56"
+
+.. important::
+
+    Hotplugging physical interfaces is not supported using the above syntax.
+    This is expected to change with the release of DPDK v18.05. For information
+    on hotplugging physical interfaces, you should instead refer to
+    :ref:`port-hotplug`.
 
 After the DPDK ports get added to switch, a polling thread continuously polls
 DPDK devices and consumes 100% of the core, as can be checked from ``top`` and
@@ -68,337 +86,6 @@ To stop ovs-vswitchd & delete bridge, run::
     $ ovs-appctl -t ovs-vswitchd exit
     $ ovs-appctl -t ovsdb-server exit
     $ ovs-vsctl del-br br0
-
-PMD Thread Statistics
----------------------
-
-To show current stats::
-
-    $ ovs-appctl dpif-netdev/pmd-stats-show
-
-To clear previous stats::
-
-    $ ovs-appctl dpif-netdev/pmd-stats-clear
-
-Port/RXQ Assigment to PMD Threads
----------------------------------
-
-To show port/rxq assignment::
-
-    $ ovs-appctl dpif-netdev/pmd-rxq-show
-
-To change default rxq assignment to pmd threads, rxqs may be manually pinned to
-desired cores using::
-
-    $ ovs-vsctl set Interface <iface> \
-        other_config:pmd-rxq-affinity=<rxq-affinity-list>
-
-where:
-
-- ``<rxq-affinity-list>`` is a CSV list of ``<queue-id>:<core-id>`` values
-
-For example::
-
-    $ ovs-vsctl set interface dpdk-p0 options:n_rxq=4 \
-        other_config:pmd-rxq-affinity="0:3,1:7,3:8"
-
-This will ensure:
-
-- Queue #0 pinned to core 3
-- Queue #1 pinned to core 7
-- Queue #2 not pinned
-- Queue #3 pinned to core 8
-
-After that PMD threads on cores where RX queues was pinned will become
-``isolated``. This means that this thread will poll only pinned RX queues.
-
-.. warning::
-  If there are no ``non-isolated`` PMD threads, ``non-pinned`` RX queues will
-  not be polled. Also, if provided ``core_id`` is not available (ex. this
-  ``core_id`` not in ``pmd-cpu-mask``), RX queue will not be polled by any PMD
-  thread.
-
-QoS
----
-
-Assuming you have a vhost-user port transmitting traffic consisting of packets
-of size 64 bytes, the following command would limit the egress transmission
-rate of the port to ~1,000,000 packets per second::
-
-    $ ovs-vsctl set port vhost-user0 qos=@newqos -- \
-        --id=@newqos create qos type=egress-policer other-config:cir=46000000 \
-        other-config:cbs=2048`
-
-To examine the QoS configuration of the port, run::
-
-    $ ovs-appctl -t ovs-vswitchd qos/show vhost-user0
-
-To clear the QoS configuration from the port and ovsdb, run::
-
-    $ ovs-vsctl destroy QoS vhost-user0 -- clear Port vhost-user0 qos
-
-Refer to vswitch.xml for more details on egress-policer.
-
-Rate Limiting
---------------
-
-Here is an example on Ingress Policing usage. Assuming you have a vhost-user
-port receiving traffic consisting of packets of size 64 bytes, the following
-command would limit the reception rate of the port to ~1,000,000 packets per
-second::
-
-    $ ovs-vsctl set interface vhost-user0 ingress_policing_rate=368000 \
-        ingress_policing_burst=1000`
-
-To examine the ingress policer configuration of the port::
-
-    $ ovs-vsctl list interface vhost-user0
-
-To clear the ingress policer configuration from the port::
-
-    $ ovs-vsctl set interface vhost-user0 ingress_policing_rate=0
-
-Refer to vswitch.xml for more details on ingress-policer.
-
-Flow Control
-------------
-
-Flow control can be enabled only on DPDK physical ports. To enable flow control
-support at tx side while adding a port, run::
-
-    $ ovs-vsctl add-port br0 dpdk-p0 -- set Interface dpdk-p0 type=dpdk \
-        options:dpdk-devargs=0000:01:00.0 options:tx-flow-ctrl=true
-
-Similarly, to enable rx flow control, run::
-
-    $ ovs-vsctl add-port br0 dpdk-p0 -- set Interface dpdk-p0 type=dpdk \
-        options:dpdk-devargs=0000:01:00.0 options:rx-flow-ctrl=true
-
-To enable flow control auto-negotiation, run::
-
-    $ ovs-vsctl add-port br0 dpdk-p0 -- set Interface dpdk-p0 type=dpdk \
-        options:dpdk-devargs=0000:01:00.0 options:flow-ctrl-autoneg=true
-
-To turn ON the tx flow control at run time for an existing port, run::
-
-    $ ovs-vsctl set Interface dpdk-p0 options:tx-flow-ctrl=true
-
-The flow control parameters can be turned off by setting ``false`` to the
-respective parameter. To disable the flow control at tx side, run::
-
-    $ ovs-vsctl set Interface dpdk-p0 options:tx-flow-ctrl=false
-
-pdump
------
-
-pdump allows you to listen on DPDK ports and view the traffic that is passing
-on them. To use this utility, one must have libpcap installed on the system.
-Furthermore, DPDK must be built with ``CONFIG_RTE_LIBRTE_PDUMP=y`` and
-``CONFIG_RTE_LIBRTE_PMD_PCAP=y``.
-
-.. warning::
-  A performance decrease is expected when using a monitoring application like
-  the DPDK pdump app.
-
-To use pdump, simply launch OVS as usual, then navigate to the ``app/pdump``
-directory in DPDK, ``make`` the application and run like so::
-
-    $ sudo ./build/app/dpdk-pdump -- \
-        --pdump port=0,queue=0,rx-dev=/tmp/pkts.pcap \
-        --server-socket-path=/usr/local/var/run/openvswitch
-
-The above command captures traffic received on queue 0 of port 0 and stores it
-in ``/tmp/pkts.pcap``. Other combinations of port numbers, queues numbers and
-pcap locations are of course also available to use. For example, to capture all
-packets that traverse port 0 in a single pcap file::
-
-    $ sudo ./build/app/dpdk-pdump -- \
-        --pdump 'port=0,queue=*,rx-dev=/tmp/pkts.pcap,tx-dev=/tmp/pkts.pcap' \
-        --server-socket-path=/usr/local/var/run/openvswitch
-
-``server-socket-path`` must be set to the value of ``ovs_rundir()`` which
-typically resolves to ``/usr/local/var/run/openvswitch``.
-
-Many tools are available to view the contents of the pcap file. Once example is
-tcpdump. Issue the following command to view the contents of ``pkts.pcap``::
-
-    $ tcpdump -r pkts.pcap
-
-More information on the pdump app and its usage can be found in the `DPDK docs
-<http://dpdk.org/doc/guides/tools/pdump.html>`__.
-
-Jumbo Frames
-------------
-
-By default, DPDK ports are configured with standard Ethernet MTU (1500B). To
-enable Jumbo Frames support for a DPDK port, change the Interface's
-``mtu_request`` attribute to a sufficiently large value. For example, to add a
-DPDK Phy port with MTU of 9000::
-
-    $ ovs-vsctl add-port br0 dpdk-p0 -- set Interface dpdk-p0 type=dpdk \
-          options:dpdk-devargs=0000:01:00.0 mtu_request=9000
-
-Similarly, to change the MTU of an existing port to 6200::
-
-    $ ovs-vsctl set Interface dpdk-p0 mtu_request=6200
-
-Some additional configuration is needed to take advantage of jumbo frames with
-vHost ports:
-
-1. *mergeable buffers* must be enabled for vHost ports, as demonstrated in the
-   QEMU command line snippet below::
-
-       -netdev type=vhost-user,id=mynet1,chardev=char0,vhostforce \
-       -device virtio-net-pci,mac=00:00:00:00:00:01,netdev=mynet1,mrg_rxbuf=on
-
-2. Where virtio devices are bound to the Linux kernel driver in a guest
-   environment (i.e. interfaces are not bound to an in-guest DPDK driver), the
-   MTU of those logical network interfaces must also be increased to a
-   sufficiently large value. This avoids segmentation of Jumbo Frames received
-   in the guest. Note that 'MTU' refers to the length of the IP packet only,
-   and not that of the entire frame.
-
-   To calculate the exact MTU of a standard IPv4 frame, subtract the L2 header
-   and CRC lengths (i.e. 18B) from the max supported frame size.  So, to set
-   the MTU for a 9018B Jumbo Frame::
-
-       $ ifconfig eth1 mtu 9000
-
-When Jumbo Frames are enabled, the size of a DPDK port's mbuf segments are
-increased, such that a full Jumbo Frame of a specific size may be accommodated
-within a single mbuf segment.
-
-Jumbo frame support has been validated against 9728B frames, which is the
-largest frame size supported by Fortville NIC using the DPDK i40e driver, but
-larger frames and other DPDK NIC drivers may be supported. These cases are
-common for use cases involving East-West traffic only.
-
-Rx Checksum Offload
--------------------
-
-By default, DPDK physical ports are enabled with Rx checksum offload. Rx
-checksum offload can be configured on a DPDK physical port either when adding
-or at run time.
-
-To disable Rx checksum offload when adding a DPDK port dpdk-p0::
-
-    $ ovs-vsctl add-port br0 dpdk-p0 -- set Interface dpdk-p0 type=dpdk \
-      options:dpdk-devargs=0000:01:00.0 options:rx-checksum-offload=false
-
-Similarly to disable the Rx checksum offloading on a existing DPDK port dpdk-p0::
-
-    $ ovs-vsctl set Interface dpdk-p0 options:rx-checksum-offload=false
-
-Rx checksum offload can offer performance improvement only for tunneling
-traffic in OVS-DPDK because the checksum validation of tunnel packets is
-offloaded to the NIC. Also enabling Rx checksum may slightly reduce the
-performance of non-tunnel traffic, specifically for smaller size packet.
-DPDK vectorization is disabled when checksum offloading is configured on DPDK
-physical ports which in turn effects the non-tunnel traffic performance.
-So it is advised to turn off the Rx checksum offload for non-tunnel traffic use
-cases to achieve the best performance.
-
-.. _extended-statistics:
-
-Extended Statistics
--------------------
-
-DPDK Extended Statistics API allows PMD to expose unique set of statistics.
-The Extended statistics are implemented and supported only for DPDK physical
-and vHost ports.
-
-To enable statistics, you have to enable OpenFlow 1.4 support for OVS.
-Configure bridge br0 to support OpenFlow version 1.4::
-
-    $ ovs-vsctl set bridge br0 datapath_type=netdev \
-      protocols=OpenFlow10,OpenFlow11,OpenFlow12,OpenFlow13,OpenFlow14
-
-Check the OVSDB protocols column in the bridge table if OpenFlow 1.4 support
-is enabled for OVS::
-
-    $ ovsdb-client dump Bridge protocols
-
-Query the port statistics by explicitly specifying -O OpenFlow14 option::
-
-    $ ovs-ofctl -O OpenFlow14 dump-ports br0
-
-Note: vHost ports supports only partial statistics. RX packet size based
-counter are only supported and doesn't include TX packet size counters.
-
-.. _port-hotplug:
-
-Port Hotplug
-------------
-
-OVS supports port hotplugging, allowing the use of ports that were not bound
-to DPDK when vswitchd was started.
-In order to attach a port, it has to be bound to DPDK using the
-``dpdk_nic_bind.py`` script::
-
-    $ $DPDK_DIR/tools/dpdk_nic_bind.py --bind=igb_uio 0000:01:00.0
-
-Then it can be attached to OVS::
-
-    $ ovs-vsctl add-port br0 dpdkx -- set Interface dpdkx type=dpdk \
-        options:dpdk-devargs=0000:01:00.0
-
-It is also possible to detach a port from ovs, the user has to remove the
-port using the del-port command, then it can be detached using::
-
-    $ ovs-appctl netdev-dpdk/detach 0000:01:00.0
-
-This feature is not supported with VFIO and does not work with some NICs.
-For more information please refer to the `DPDK Port Hotplug Framework
-<http://dpdk.org/doc/guides/prog_guide/port_hotplug_framework.html#hotplug>`__.
-
-.. _vdev-support:
-
-Vdev Support
-------------
-
-DPDK provides drivers for both physical and virtual devices. Physical DPDK
-devices are added to OVS by specifying a valid PCI address in 'dpdk-devargs'.
-Virtual DPDK devices which do not have PCI addresses can be added using a
-different format for 'dpdk-devargs'.
-
-Typically, the format expected is 'eth_<driver_name><x>' where 'x' is a
-number between 0 and RTE_MAX_ETHPORTS -1 (31).
-
-For example to add a dpdk port that uses the 'null' DPDK PMD driver::
-
-       $ ovs-vsctl add-port br0 null0 -- set Interface null0 type=dpdk \
-           options:dpdk-devargs=eth_null0
-
-Similarly, to add a dpdk port that uses the 'af_packet' DPDK PMD driver::
-
-       $ ovs-vsctl add-port br0 myeth0 -- set Interface myeth0 type=dpdk \
-           options:dpdk-devargs=eth_af_packet0,iface=eth0
-
-More information on the different types of virtual DPDK PMDs can be found in
-the `DPDK documentation
-<http://dpdk.org/doc/guides/nics/overview.html>`__.
-
-Note: Not all DPDK virtual PMD drivers have been tested and verified to work.
-
-EMC Insertion Probability
--------------------------
-By default 1 in every 100 flows are inserted into the Exact Match Cache (EMC).
-It is possible to change this insertion probability by setting the
-``emc-insert-inv-prob`` option::
-
-    $ ovs-vsctl --no-wait set Open_vSwitch . other_config:emc-insert-inv-prob=N
-
-where:
-
-``N``
-  is a positive integer representing the inverse probability of insertion ie.
-  on average 1 in every N packets with a unique flow will generate an EMC
-  insertion.
-
-If ``N`` is set to 1, an insertion will be performed for every flow. If set to
-0, no insertions will be performed and the EMC will effectively be disabled.
-
-For more information on the EMC refer to :doc:`/intro/install/dpdk` .
 
 .. _dpdk-ovs-in-guest:
 
@@ -441,7 +128,7 @@ Add a userspace bridge and two ``dpdk`` (PHY) ports::
     $ ovs-vsctl add-port br0 phy1 -- set Interface phy1 type=dpdk
           options:dpdk-devargs=0000:01:00.1 ofport_request=2
 
-Add test flows to forward packets betwen DPDK port 0 and port 1::
+Add test flows to forward packets between DPDK port 0 and port 1::
 
     # Clear current flows
     $ ovs-ofctl del-flows br0
@@ -476,7 +163,7 @@ ports::
     $ ovs-vsctl add-port br0 dpdkvhostuser1 \
         -- set Interface dpdkvhostuser1 type=dpdkvhostuser ofport_request=4
 
-Add test flows to forward packets betwen DPDK devices and VM ports::
+Add test flows to forward packets between DPDK devices and VM ports::
 
     # Clear current flows
     $ ovs-ofctl del-flows br0
@@ -492,16 +179,18 @@ Add test flows to forward packets betwen DPDK devices and VM ports::
 
 Create a VM using the following configuration:
 
-+----------------------+--------+-----------------+
-| configuration        | values | comments        |
-+----------------------+--------+-----------------+
-| qemu version         | 2.2.0  | n/a             |
-| qemu thread affinity | core 5 | taskset 0x20    |
-| memory               | 4GB    | n/a             |
-| cores                | 2      | n/a             |
-| Qcow2 image          | CentOS7| n/a             |
-| mrg_rxbuf            | off    | n/a             |
-+----------------------+--------+-----------------+
+.. table::
+
+    ===================== ======== ============
+        Configuration      Values    Comments
+    ===================== ======== ============
+    QEMU version          2.2.0    n/a
+    QEMU thread affinity  core 5   taskset 0x20
+    Memory                4GB      n/a
+    Cores                 2        n/a
+    Qcow2 image           CentOS7  n/a
+    mrg_rxbuf             off      n/a
+    ===================== ======== ============
 
 You can do this directly with QEMU via the ``qemu-system-x86_64`` application::
 
@@ -536,15 +225,15 @@ described in :ref:`dpdk-testpmd`. Once compiled, run the application::
 
 When you finish testing, bind the vNICs back to kernel::
 
-    $ $DPDK_DIR/tools/dpdk-devbind.py --bind=virtio-pci 0000:00:03.0
-    $ $DPDK_DIR/tools/dpdk-devbind.py --bind=virtio-pci 0000:00:04.0
+    $ $DPDK_DIR/usertools/dpdk-devbind.py --bind=virtio-pci 0000:00:03.0
+    $ $DPDK_DIR/usertools/dpdk-devbind.py --bind=virtio-pci 0000:00:04.0
 
 .. note::
 
   Valid PCI IDs must be passed in above example. The PCI IDs can be retrieved
   like so::
 
-      $ $DPDK_DIR/tools/dpdk-devbind.py --status
+      $ $DPDK_DIR/usertools/dpdk-devbind.py --status
 
 More information on the dpdkvhostuser ports can be found in
 :doc:`/topics/dpdk/vhost-user`.
@@ -557,8 +246,10 @@ testcase and packet forwarding using DPDK testpmd application in the Guest VM.
 For users wishing to do packet forwarding using kernel stack below, you need to
 run the below commands on the guest::
 
-    $ ifconfig eth1 1.1.1.2/24
-    $ ifconfig eth2 1.1.2.2/24
+    $ ip addr add 1.1.1.2/24 dev eth1
+    $ ip addr add 1.1.2.2/24 dev eth2
+    $ ip link set eth1 up
+    $ ip link set eth2 up
     $ systemctl stop firewalld.service
     $ systemctl stop iptables.service
     $ sysctl -w net.ipv4.ip_forward=1
@@ -648,8 +339,10 @@ devices to bridge ``br0``. Once complete, follow the below steps:
 
    Configure IP and enable interfaces::
 
-       $ ifconfig eth0 5.5.5.1/24 up
-       $ ifconfig eth1 90.90.90.1/24 up
+       $ ip addr add 5.5.5.1/24 dev eth0
+       $ ip addr add 90.90.90.1/24 dev eth1
+       $ ip link set eth0 up
+       $ ip link set eth1 up
 
    Configure IP forwarding and add route entries::
 
@@ -666,3 +359,36 @@ devices to bridge ``br0``. Once complete, follow the below steps:
    Check traffic on multiple queues::
 
        $ cat /proc/interrupts | grep virtio
+
+.. _dpdk-flow-hardware-offload:
+
+Flow Hardware Offload (Experimental)
+------------------------------------
+
+The flow hardware offload is disabled by default and can be enabled by::
+
+    $ ovs-vsctl set Open_vSwitch . other_config:hw-offload=true
+
+So far only partial flow offload is implemented. Moreover, it only works
+with PMD drivers have the rte_flow action "MARK + RSS" support.
+
+The validated NICs are:
+
+- Mellanox (ConnectX-4, ConnectX-4 Lx, ConnectX-5)
+- Napatech (NT200B01)
+
+Supported protocols for hardware offload are:
+- L2: Ethernet, VLAN
+- L3: IPv4, IPv6
+- L4: TCP, UDP, SCTP, ICMP
+
+Further Reading
+---------------
+
+More detailed information can be found in the :doc:`DPDK topics section
+</topics/dpdk/index>` of the documentation. These guides are listed below.
+
+.. NOTE(stephenfin): Remember to keep this in sync with topics/dpdk/index
+
+.. include:: ../topics/dpdk/index.rst
+   :start-line: 30

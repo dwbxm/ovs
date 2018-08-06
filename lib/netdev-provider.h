@@ -45,6 +45,16 @@ struct netdev {
     const struct netdev_class *netdev_class; /* Functions to control
                                                 this device. */
 
+    /* If this is 'true' the user did not specify a netdev_class when
+     * opening this device, and therefore got assigned to the "system" class */
+    bool auto_classified;
+
+    /* If this is 'true', the user explicitly specified an MTU for this
+     * netdev.  Otherwise, Open vSwitch is allowed to override it. */
+    bool mtu_user_config;
+
+    int ref_cnt;                        /* Times this devices was opened. */
+
     /* A sequence number which indicates changes in one of 'netdev''s
      * properties.   It must be nonzero so that users have a value which
      * they may use as a reset when tracking 'netdev'.
@@ -63,16 +73,11 @@ struct netdev {
     struct seq *reconfigure_seq;
     uint64_t last_reconfigure_seq;
 
-    /* If this is 'true', the user explicitly specified an MTU for this
-     * netdev.  Otherwise, Open vSwitch is allowed to override it. */
-    bool mtu_user_config;
-
     /* The core netdev code initializes these at netdev construction and only
      * provide read-only access to its client.  Netdev implementations may
      * modify them. */
     int n_txq;
     int n_rxq;
-    int ref_cnt;                        /* Times this devices was opened. */
     struct shash_node *node;            /* Pointer to element in global map. */
     struct ovs_list saved_flags_list; /* Contains "struct netdev_saved_flags". */
 };
@@ -114,6 +119,14 @@ struct netdev_rxq {
 };
 
 struct netdev *netdev_rxq_get_netdev(const struct netdev_rxq *);
+
+
+struct netdev_flow_dump {
+    struct netdev *netdev;
+    odp_port_t port;
+    bool terse;
+    struct nl_dump *nl_dump;
+};
 
 /* Network device class structure, to be defined by each implementation of a
  * network device.
@@ -301,7 +314,8 @@ struct netdev_class {
      * flow.  Push header is called for packet to build header specific to
      * a packet on actual transmit.  It uses partial header build by
      * build_header() which is passed as data. */
-    void (*push_header)(struct dp_packet *packet,
+    void (*push_header)(const struct netdev *,
+                        struct dp_packet *packet,
                         const struct ovs_action_push_tnl *data);
 
     /* Pop tunnel header from packet, build tunnel metadata and resize packet
@@ -335,9 +349,8 @@ struct netdev_class {
      * If the function returns a non-zero value, some of the packets might have
      * been sent anyway.
      *
-     * If 'may_steal' is false, the caller retains ownership of all the
-     * packets.  If 'may_steal' is true, the caller transfers ownership of all
-     * the packets to the network device, regardless of success.
+     * The caller transfers ownership of all the packets to the network
+     * device, regardless of success.
      *
      * If 'concurrent_txq' is true, the caller may perform concurrent calls
      * to netdev_send() with the same 'qid'. The netdev provider is responsible
@@ -357,7 +370,7 @@ struct netdev_class {
      * datapath".  It will also prevent the OVS implementation of bonding from
      * working properly over 'netdev'.) */
     int (*send)(struct netdev *netdev, int qid, struct dp_packet_batch *batch,
-                bool may_steal, bool concurrent_txq);
+                bool concurrent_txq);
 
     /* Registers with the poll loop to wake up from the next call to
      * poll_block() when the packet transmission queue for 'netdev' has
@@ -446,6 +459,19 @@ struct netdev_class {
      * (UINT64_MAX). */
     int (*get_stats)(const struct netdev *netdev, struct netdev_stats *);
 
+    /* Retrieves current device custom stats for 'netdev' into 'custom_stats'.
+     *
+     * A network device should return only available statistics (if any).
+     * If there are not statistics available, empty array should be
+     * returned.
+     *
+     * The caller initializes 'custom_stats' before calling this function.
+     * The caller takes ownership over allocated array of counters inside
+     * structure netdev_custom_stats.
+     * */
+    int (*get_custom_stats)(const struct netdev *netdev,
+                            struct netdev_custom_stats *custom_stats);
+
     /* Stores the features supported by 'netdev' into each of '*current',
      * '*advertised', '*supported', and '*peer'.  Each value is a bitmap of
      * NETDEV_F_* bits.
@@ -465,6 +491,12 @@ struct netdev_class {
      * support configuring advertisements. */
     int (*set_advertisements)(struct netdev *netdev,
                               enum netdev_features advertise);
+
+    /* Returns 'netdev''s configured packet_type mode.
+     *
+     * This function may be set to null if it would always return
+     * NETDEV_PT_LEGACY_L2. */
+    enum netdev_pt_mode (*get_pt_mode)(const struct netdev *netdev);
 
     /* Attempts to set input rate limiting (policing) policy, such that up to
      * 'kbits_rate' kbps of traffic is accepted, with a maximum accumulative
@@ -758,9 +790,15 @@ struct netdev_class {
      * Implementations should allocate buffers with DP_NETDEV_HEADROOM bytes of
      * headroom.
      *
+     * If the caller provides a non-NULL qfill pointer, the implementation
+     * should return the number (zero or more) of remaining packets in the
+     * queue after the reception the current batch, if it supports that,
+     * or -ENOTSUP otherwise.
+     *
      * Returns EAGAIN immediately if no packet is ready to be received or
      * another positive errno value if an error was encountered. */
-    int (*rxq_recv)(struct netdev_rxq *rx, struct dp_packet_batch *batch);
+    int (*rxq_recv)(struct netdev_rxq *rx, struct dp_packet_batch *batch,
+                    int *qfill);
 
     /* Registers with the poll loop to wake up from the next call to
      * poll_block() when a packet is ready to be received with
@@ -769,6 +807,73 @@ struct netdev_class {
 
     /* Discards all packets waiting to be received from 'rx'. */
     int (*rxq_drain)(struct netdev_rxq *rx);
+
+    /* ## -------------------------------- ## */
+    /* ## netdev flow offloading functions ## */
+    /* ## -------------------------------- ## */
+
+    /* If a particular netdev class does not support offloading flows,
+     * all these function pointers must be NULL. */
+
+    /* Flush all offloaded flows from a netdev.
+     * Return 0 if successful, otherwise returns a positive errno value. */
+    int (*flow_flush)(struct netdev *);
+
+    /* Flow dumping interface.
+     *
+     * This is the back-end for the flow dumping interface described in
+     * dpif.h.  Please read the comments there first, because this code
+     * closely follows it.
+     *
+     * On success returns 0 and allocates data, on failure returns
+     * positive errno. */
+    int (*flow_dump_create)(struct netdev *, struct netdev_flow_dump **dump);
+    int (*flow_dump_destroy)(struct netdev_flow_dump *);
+
+    /* Returns true if there are more flows to dump.
+     * 'rbuffer' is used as a temporary buffer and needs to be pre allocated
+     * by the caller.  While there are more flows the same 'rbuffer'
+     * should be provided. 'wbuffer' is used to store dumped actions and needs
+     * to be pre allocated by the caller. */
+    bool (*flow_dump_next)(struct netdev_flow_dump *, struct match *,
+                           struct nlattr **actions,
+                           struct dpif_flow_stats *stats,
+                           struct dpif_flow_attrs *attrs, ovs_u128 *ufid,
+                           struct ofpbuf *rbuffer, struct ofpbuf *wbuffer);
+
+    /* Offload the given flow on netdev.
+     * To modify a flow, use the same ufid.
+     * 'actions' are in netlink format, as with struct dpif_flow_put.
+     * 'info' is extra info needed to offload the flow.
+     * 'stats' is populated according to the rules set out in the description
+     * above 'struct dpif_flow_put'.
+     * Return 0 if successful, otherwise returns a positive errno value. */
+    int (*flow_put)(struct netdev *, struct match *, struct nlattr *actions,
+                    size_t actions_len, const ovs_u128 *ufid,
+                    struct offload_info *info, struct dpif_flow_stats *);
+
+    /* Queries a flow specified by ufid on netdev.
+     * Fills output buffer as 'wbuffer' in flow_dump_next, which
+     * needs to be be pre allocated.
+     * Return 0 if successful, otherwise returns a positive errno value. */
+    int (*flow_get)(struct netdev *, struct match *, struct nlattr **actions,
+                    const ovs_u128 *ufid, struct dpif_flow_stats *,
+                    struct dpif_flow_attrs *, struct ofpbuf *wbuffer);
+
+    /* Delete a flow specified by ufid from netdev.
+     * 'stats' is populated according to the rules set out in the description
+     * above 'struct dpif_flow_del'.
+     * Return 0 if successful, otherwise returns a positive errno value. */
+    int (*flow_del)(struct netdev *, const ovs_u128 *ufid,
+                    struct dpif_flow_stats *);
+
+    /* Initializies the netdev flow api.
+     * Return 0 if successful, otherwise returns a positive errno value. */
+    int (*init_flow_api)(struct netdev *);
+
+    /* Get a block_id from the netdev.
+     * Returns the block_id or 0 if none exists for netdev. */
+    uint32_t (*get_block_id)(struct netdev *);
 };
 
 int netdev_register_provider(const struct netdev_class *);
@@ -787,5 +892,7 @@ extern const struct netdev_class netdev_tap_class;
 #ifdef  __cplusplus
 }
 #endif
+
+#define NO_OFFLOAD_API NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
 
 #endif /* netdev.h */

@@ -16,6 +16,7 @@
 *.lib
 *.pdb
 *.pyc
+*.retry
 *.so
 *.suo
 **/*.sym
@@ -29,7 +30,7 @@
 .dirstamp
 .libs
 .tmp_versions
-.gitattributes
+.vagrant
 /Makefile
 /Makefile.in
 /aclocal.m4
@@ -51,6 +52,7 @@
 /distfiles
 /dist-docs
 /flake8-check
+/docs-check
 /install-sh
 /libtool
 /manpage-check
@@ -74,3 +76,4 @@ testsuite.tmp.orig
 /tests/lcov/
 /Documentation/_build
 /.venv
+/cxx-check

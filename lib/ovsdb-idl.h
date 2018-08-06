@@ -1,4 +1,5 @@
 /* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (C) 2016 Hewlett Packard Enterprise Development LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,6 +42,11 @@
 #include "ovsdb-data.h"
 #include "openvswitch/list.h"
 #include "ovsdb-condition.h"
+#include "skiplist.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct json;
 struct ovsdb_datum;
@@ -57,6 +63,8 @@ struct ovsdb_idl *ovsdb_idl_create(const char *remote,
 void ovsdb_idl_set_remote(struct ovsdb_idl *, const char *, bool);
 void ovsdb_idl_destroy(struct ovsdb_idl *);
 
+void ovsdb_idl_set_leader_only(struct ovsdb_idl *, bool leader_only);
+
 void ovsdb_idl_run(struct ovsdb_idl *);
 void ovsdb_idl_wait(struct ovsdb_idl *);
 
@@ -72,11 +80,16 @@ void ovsdb_idl_force_reconnect(struct ovsdb_idl *);
 void ovsdb_idl_verify_write_only(struct ovsdb_idl *);
 
 bool ovsdb_idl_is_alive(const struct ovsdb_idl *);
+bool ovsdb_idl_is_connected(const struct ovsdb_idl *idl);
 int ovsdb_idl_get_last_error(const struct ovsdb_idl *);
 
 void ovsdb_idl_set_probe_interval(const struct ovsdb_idl *, int probe_interval);
 
 void ovsdb_idl_check_consistency(const struct ovsdb_idl *);
+
+const struct ovsdb_idl_class *ovsdb_idl_get_class(const struct ovsdb_idl *);
+const struct ovsdb_idl_table_class *ovsdb_idl_table_class_from_column(
+    const struct ovsdb_idl_class *, const struct ovsdb_idl_column *);
 
 /* Choosing columns and tables to replicate. */
 
@@ -156,7 +169,7 @@ const struct ovsdb_idl_row *ovsdb_idl_track_get_first(
 const struct ovsdb_idl_row *ovsdb_idl_track_get_next(const struct ovsdb_idl_row *);
 bool ovsdb_idl_track_is_updated(const struct ovsdb_idl_row *row,
                                 const struct ovsdb_idl_column *column);
-void ovsdb_idl_track_clear(const struct ovsdb_idl *);
+void ovsdb_idl_track_clear(struct ovsdb_idl *);
 
 
 /* Reading the database replica. */
@@ -354,4 +367,60 @@ unsigned int ovsdb_idl_set_condition(struct ovsdb_idl *,
                                      const struct ovsdb_idl_condition *);
 
 unsigned int ovsdb_idl_get_condition_seqno(const struct ovsdb_idl *);
+
+/* Indexes over one or more columns in the IDL, to retrieve rows matching
+ * particular search criteria and to iterate over a subset of rows in a defined
+ * order. */
+
+enum ovsdb_index_order {
+    OVSDB_INDEX_ASC,            /* 0, 1, 2, ... */
+    OVSDB_INDEX_DESC            /* 2, 1, 0, ... */
+};
+
+typedef int column_comparator_func(const void *a, const void *b);
+
+struct ovsdb_idl_index_column {
+    const struct ovsdb_idl_column *column;
+    column_comparator_func *comparer;
+    enum ovsdb_index_order order;
+};
+
+/* Creating an index. */
+struct ovsdb_idl_index *ovsdb_idl_index_create(
+    struct ovsdb_idl *, const struct ovsdb_idl_index_column *, size_t n);
+struct ovsdb_idl_index *ovsdb_idl_index_create1(
+    struct ovsdb_idl *, const struct ovsdb_idl_column *);
+struct ovsdb_idl_index *ovsdb_idl_index_create2(
+    struct ovsdb_idl *, const struct ovsdb_idl_column *,
+    const struct ovsdb_idl_column *);
+
+/* Searching an index. */
+struct ovsdb_idl_row *ovsdb_idl_index_find(struct ovsdb_idl_index *,
+                                           const struct ovsdb_idl_row *);
+
+/* Iteration over an index.
+ *
+ * Usually these would be invoked through table-specific wrappers generated
+ * by the IDL. */
+
+struct ovsdb_idl_cursor {
+    struct ovsdb_idl_index *index;  /* Index being iterated. */
+    struct skiplist_node *position; /* Current position in 'index'. */
+};
+
+struct ovsdb_idl_cursor ovsdb_idl_cursor_first(struct ovsdb_idl_index *);
+struct ovsdb_idl_cursor ovsdb_idl_cursor_first_eq(
+    struct ovsdb_idl_index *, const struct ovsdb_idl_row *);
+struct ovsdb_idl_cursor ovsdb_idl_cursor_first_ge(
+    struct ovsdb_idl_index *, const struct ovsdb_idl_row *);
+
+void ovsdb_idl_cursor_next(struct ovsdb_idl_cursor *);
+void ovsdb_idl_cursor_next_eq(struct ovsdb_idl_cursor *);
+
+struct ovsdb_idl_row *ovsdb_idl_cursor_data(struct ovsdb_idl_cursor *);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* ovsdb-idl.h */

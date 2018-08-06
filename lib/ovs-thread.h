@@ -260,7 +260,7 @@ void xpthread_join(pthread_t, void **);
     static inline NAME##_type *                                         \
     NAME##_get_unsafe(void)                                             \
     {                                                                   \
-        return &NAME##_var;                                             \
+        return (NAME##_type *)&NAME##_var;                              \
     }                                                                   \
                                                                         \
     static inline NAME##_type *                                         \
@@ -316,7 +316,7 @@ void xpthread_join(pthread_t, void **);
     static inline NAME##_type *                                         \
     NAME##_get_unsafe(void)                                             \
     {                                                                   \
-        return pthread_getspecific(NAME##_key);                         \
+        return (NAME##_type *)pthread_getspecific(NAME##_key);          \
     }                                                                   \
                                                                         \
     NAME##_type *NAME##_get(void);
@@ -465,14 +465,24 @@ void *ovsthread_getspecific(ovsthread_key_t);
  * This thread ID avoids the problem.
  */
 
+#define OVSTHREAD_ID_UNSET UINT_MAX
 DECLARE_EXTERN_PER_THREAD_DATA(unsigned int, ovsthread_id);
+
+/* Initializes the unique per thread identifier */
+unsigned int ovsthread_id_init(void);
 
 /* Returns a per-thread identifier unique within the lifetime of the
  * process. */
 static inline unsigned int
 ovsthread_id_self(void)
 {
-    return *ovsthread_id_get();
+    unsigned int id = *ovsthread_id_get();
+
+    if (OVS_UNLIKELY(id == OVSTHREAD_ID_UNSET)) {
+        id = ovsthread_id_init();
+    }
+
+    return id;
 }
 
 /* Simulated global counter.

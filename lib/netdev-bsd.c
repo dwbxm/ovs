@@ -56,7 +56,7 @@
 #include "openflow/openflow.h"
 #include "ovs-thread.h"
 #include "packets.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "openvswitch/shash.h"
 #include "socket-util.h"
 #include "svec.h"
@@ -65,7 +65,6 @@
 
 VLOG_DEFINE_THIS_MODULE(netdev_bsd);
 
-
 struct netdev_rxq_bsd {
     struct netdev_rxq up;
 
@@ -618,7 +617,8 @@ netdev_rxq_bsd_recv_tap(struct netdev_rxq_bsd *rxq, struct dp_packet *buffer)
 }
 
 static int
-netdev_bsd_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch)
+netdev_bsd_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch,
+                    int *qfill)
 {
     struct netdev_rxq_bsd *rxq = netdev_rxq_bsd_cast(rxq_);
     struct netdev *netdev = rxq->up.netdev;
@@ -630,6 +630,7 @@ netdev_bsd_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch)
         mtu = ETH_PAYLOAD_MAX;
     }
 
+    /* Assume Ethernet port. No need to set packet_type. */
     packet = dp_packet_new_with_headroom(VLAN_ETH_HEADER_LEN + mtu,
                                            DP_NETDEV_HEADROOM);
     retval = (rxq->pcap_handle
@@ -642,6 +643,11 @@ netdev_bsd_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch)
         batch->packets[0] = packet;
         batch->count = 1;
     }
+
+    if (qfill) {
+        *qfill = -ENOTSUP;
+    }
+
     return retval;
 }
 
@@ -679,7 +685,7 @@ netdev_bsd_rxq_drain(struct netdev_rxq *rxq_)
  */
 static int
 netdev_bsd_send(struct netdev *netdev_, int qid OVS_UNUSED,
-                struct dp_packet_batch *batch, bool may_steal,
+                struct dp_packet_batch *batch,
                 bool concurrent_txq OVS_UNUSED)
 {
     struct netdev_bsd *dev = netdev_bsd_cast(netdev_);
@@ -697,9 +703,6 @@ netdev_bsd_send(struct netdev *netdev_, int qid OVS_UNUSED,
     for (i = 0; i < batch->count; i++) {
         const void *data = dp_packet_data(batch->packets[i]);
         size_t size = dp_packet_size(batch->packets[i]);
-
-        /* Truncate the packet if it is configured. */
-        size -= dp_packet_get_cutlen(batch->packets[i]);
 
         while (!error) {
             ssize_t retval;
@@ -730,7 +733,7 @@ netdev_bsd_send(struct netdev *netdev_, int qid OVS_UNUSED,
     }
 
     ovs_mutex_unlock(&dev->mutex);
-    dp_packet_delete_batch(batch, may_steal);
+    dp_packet_delete_batch(batch, true);
 
     return error;
 }
@@ -1513,9 +1516,10 @@ netdev_bsd_update_flags(struct netdev *netdev_, enum netdev_flags off,
     NULL, /* get_carrier_resets */                   \
     NULL, /* set_miimon_interval */                  \
     netdev_bsd_get_stats,                            \
-                                                     \
+    NULL, /* get_custom_stats */                     \
     GET_FEATURES,                                    \
     NULL, /* set_advertisement */                    \
+    NULL, /* get_pt_mode */                          \
     NULL, /* set_policing */                         \
     NULL, /* get_qos_type */                         \
     NULL, /* get_qos_capabilities */                 \
@@ -1547,6 +1551,9 @@ netdev_bsd_update_flags(struct netdev *netdev_, enum netdev_flags off,
     netdev_bsd_rxq_recv,                             \
     netdev_bsd_rxq_wait,                             \
     netdev_bsd_rxq_drain,                            \
+                                                     \
+    NO_OFFLOAD_API,                                  \
+    NULL /* get_block_id */   \
 }
 
 const struct netdev_class netdev_bsd_class =

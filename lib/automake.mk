@@ -80,6 +80,8 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/dpdk.h \
 	lib/dpif-netdev.c \
 	lib/dpif-netdev.h \
+	lib/dpif-netdev-perf.c \
+	lib/dpif-netdev-perf.h \
 	lib/dpif-provider.h \
 	lib/dpif.c \
 	lib/dpif.h \
@@ -129,6 +131,7 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/meta-flow.c \
 	lib/multipath.c \
 	lib/multipath.h \
+	lib/namemap.c \
 	lib/netdev-dpdk.h \
 	lib/netdev-dummy.c \
 	lib/netdev-provider.h \
@@ -140,6 +143,7 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/netflow.h \
 	lib/netlink.c \
 	lib/netlink.h \
+	lib/netnsid.h \
 	lib/nx-match.c \
 	lib/nx-match.h \
 	lib/object-collection.c \
@@ -149,15 +153,31 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/odp-util.c \
 	lib/odp-util.h \
 	lib/ofp-actions.c \
+	lib/ofp-bundle.c \
+	lib/ofp-connection.c \
+	lib/ofp-ed-props.c \
 	lib/ofp-errors.c \
+	lib/ofp-flow.c \
+	lib/ofp-group.c \
+	lib/ofp-ipfix.c \
+	lib/ofp-match.c \
+	lib/ofp-meter.c \
+	lib/ofp-monitor.c \
 	lib/ofp-msgs.c \
+	lib/ofp-packet.c \
 	lib/ofp-parse.c \
+	lib/ofp-port.c \
 	lib/ofp-print.c \
 	lib/ofp-prop.c \
+	lib/ofp-protocol.c \
+	lib/ofp-queue.c \
+	lib/ofp-switch.c \
+	lib/ofp-table.c \
 	lib/ofp-util.c \
 	lib/ofp-version-opt.h \
 	lib/ofp-version-opt.c \
 	lib/ofpbuf.c \
+	lib/ovs-atomic-c++.h \
 	lib/ovs-atomic-c11.h \
 	lib/ovs-atomic-clang.h \
 	lib/ovs-atomic-flag-gcc4.7+.h \
@@ -195,16 +215,21 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/ovsdb-condition.c \
 	lib/ovsdb-parser.c \
 	lib/ovsdb-parser.h \
+	lib/ovsdb-session.c \
+	lib/ovsdb-session.h \
 	lib/ovsdb-types.c \
 	lib/ovsdb-types.h \
+	lib/ox-stat.c \
+	lib/ox-stat.h \
 	lib/packets.c \
 	lib/packets.h \
 	lib/pcap-file.c \
 	lib/pcap-file.h \
 	lib/perf-counter.h \
 	lib/perf-counter.c \
+	lib/stopwatch.h \
+	lib/stopwatch.c \
 	lib/poll-loop.c \
-	lib/poll-loop.h \
 	lib/process.c \
 	lib/process.h \
 	lib/pvector.c \
@@ -212,7 +237,6 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/random.c \
 	lib/random.h \
 	lib/rconn.c \
-	lib/rconn.h \
 	lib/rculist.h \
 	lib/reconnect.c \
 	lib/reconnect.h \
@@ -229,6 +253,8 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/shash.c \
 	lib/simap.c \
 	lib/simap.h \
+	lib/skiplist.c \
+	lib/skiplist.h \
 	lib/smap.c \
 	lib/smap.h \
 	lib/socket-util.c \
@@ -323,6 +349,8 @@ EXTRA_DIST += \
 
 nodist_lib_libopenvswitch_la_SOURCES = \
 	lib/dirs.c \
+	lib/ovsdb-server-idl.c \
+	lib/ovsdb-server-idl.h \
 	lib/vswitch-idl.c \
 	lib/vswitch-idl.h
 CLEANFILES += $(nodist_lib_libopenvswitch_la_SOURCES)
@@ -352,10 +380,14 @@ if LINUX
 lib_libopenvswitch_la_SOURCES += \
 	lib/dpif-netlink.c \
 	lib/dpif-netlink.h \
+	lib/dpif-netlink-rtnl.c \
+	lib/dpif-netlink-rtnl.h \
 	lib/if-notifier.c \
 	lib/if-notifier.h \
 	lib/netdev-linux.c \
 	lib/netdev-linux.h \
+	lib/netdev-tc-offloads.c \
+	lib/netdev-tc-offloads.h \
 	lib/netlink-conntrack.c \
 	lib/netlink-conntrack.h \
 	lib/netlink-notifier.c \
@@ -366,7 +398,9 @@ lib_libopenvswitch_la_SOURCES += \
 	lib/rtnetlink.c \
 	lib/rtnetlink.h \
 	lib/route-table.c \
-	lib/route-table.h
+	lib/route-table.h \
+	lib/tc.c \
+	lib/tc.h
 endif
 
 if DPDK_NETDEV
@@ -382,6 +416,7 @@ if WIN32
 lib_libopenvswitch_la_SOURCES += \
 	lib/dpif-netlink.c \
 	lib/dpif-netlink.h \
+	lib/dpif-netlink-rtnl.h \
 	lib/netdev-windows.c \
 	lib/netlink-conntrack.c \
 	lib/netlink-conntrack.h \
@@ -415,18 +450,26 @@ lib_libopenvswitch_la_SOURCES += \
 	lib/route-table-bsd.c
 endif
 
+.PHONY: generate-dhparams-c
 if HAVE_OPENSSL
-lib_libopenvswitch_la_SOURCES += lib/stream-ssl.c
-nodist_lib_libopenvswitch_la_SOURCES += lib/dhparams.c
-lib/dhparams.c: lib/dh1024.pem lib/dh2048.pem lib/dh4096.pem
-	$(AM_V_GEN)(echo '#include "lib/dhparams.h"' &&                 \
-	 openssl dhparam -C -in $(srcdir)/lib/dh1024.pem -noout &&	\
-	 openssl dhparam -C -in $(srcdir)/lib/dh2048.pem -noout &&	\
-	 openssl dhparam -C -in $(srcdir)/lib/dh4096.pem -noout)	\
-	| sed 's/\(get_dh[0-9]*\)()/\1(void)/' > lib/dhparams.c.tmp &&  \
+lib_libopenvswitch_la_SOURCES += lib/stream-ssl.c lib/dhparams.c
+
+# Manually regenerates lib/dhparams.c.  Not normally necessary since
+# lib/dhparams.c is part of the repository and doesn't normally need
+# updates.
+generate-dhparams-c:
+	$(AM_V_GEN)cd $(srcdir) && \
+	build-aux/generate-dhparams-c > lib/dhparams.c.tmp && \
 	mv lib/dhparams.c.tmp lib/dhparams.c
 else
 lib_libopenvswitch_la_SOURCES += lib/stream-nossl.c
+endif
+
+lib_libopenvswitch_la_SOURCES += lib/dns-resolve.h
+if HAVE_UNBOUND
+lib_libopenvswitch_la_SOURCES += lib/dns-resolve.c
+else
+lib_libopenvswitch_la_SOURCES += lib/dns-resolve-stub.c
 endif
 
 pkgconfig_DATA += \
@@ -443,7 +486,10 @@ EXTRA_DIST += \
 	lib/db-ctl-base.xml \
 	lib/ssl.xml \
 	lib/ssl-bootstrap.xml \
-	lib/vlog.xml
+	lib/ssl-peer-ca-cert.xml \
+	lib/table.xml \
+	lib/vlog.xml \
+	lib/unixctl.xml
 
 MAN_FRAGMENTS += \
 	lib/colors.man \
@@ -455,6 +501,8 @@ MAN_FRAGMENTS += \
 	lib/db-ctl-base.man \
 	lib/dpctl.man \
 	lib/memory-unixctl.man \
+	lib/netdev-dpdk-unixctl.man \
+	lib/dpif-netdev-unixctl.man \
 	lib/ofp-version.man \
 	lib/ovs.tmac \
 	lib/service.man \
@@ -531,12 +579,15 @@ lib/ofp-msgs.lo: lib/ofp-msgs.inc
 CLEANFILES += lib/ofp-msgs.inc
 EXTRA_DIST += build-aux/extract-ofp-msgs
 
+# _server IDL
+OVSIDL_BUILT += lib/ovsdb-server-idl.c lib/ovsdb-server-idl.h lib/ovsdb-server-idl.ovsidl
+EXTRA_DIST += lib/ovsdb-server-idl.ann
+lib/ovsdb-server-idl.ovsidl: ovsdb/_server.ovsschema lib/ovsdb-server-idl.ann
+	$(AM_V_GEN)$(OVSDB_IDLC) annotate $(srcdir)/ovsdb/_server.ovsschema $(srcdir)/lib/ovsdb-server-idl.ann > $@.tmp && mv $@.tmp $@
+
 INSTALL_DATA_LOCAL += lib-install-data-local
 lib-install-data-local:
-	$(MKDIR_P) $(DESTDIR)$(RUNDIR)
 	$(MKDIR_P) $(DESTDIR)$(PKIDIR)
-	$(MKDIR_P) $(DESTDIR)$(LOGDIR)
-	$(MKDIR_P) $(DESTDIR)$(DBDIR)
 	$(MKDIR_P) $(DESTDIR)$(sysconfdir)/openvswitch
 
 man_MANS += lib/ovs-fields.7

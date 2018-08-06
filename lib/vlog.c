@@ -360,7 +360,7 @@ vlog_set_log_file(const char *file_name)
     new_log_file_name = (file_name
                          ? xstrdup(file_name)
                          : xasprintf("%s/%s.log", ovs_logdir(), program_name));
-    new_log_fd = open(new_log_file_name, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    new_log_fd = open(new_log_file_name, O_WRONLY | O_CREAT | O_APPEND, 0660);
     if (new_log_fd < 0) {
         VLOG_WARN("failed to open %s for logging: %s",
                   new_log_file_name, ovs_strerror(errno));
@@ -599,7 +599,7 @@ vlog_set_syslog_target(const char *target)
 {
     int new_fd;
 
-    inet_open_active(SOCK_DGRAM, target, 0, NULL, &new_fd, 0);
+    inet_open_active(SOCK_DGRAM, target, -1, NULL, &new_fd, 0);
 
     ovs_rwlock_wrlock(&pattern_rwlock);
     if (syslog_fd >= 0) {
@@ -631,6 +631,10 @@ vlog_unixctl_set(struct unixctl_conn *conn, int argc, const char *argv[],
 {
     int i;
 
+    /* With no argument, set all destinations and modules to "dbg". */
+    if (argc == 1) {
+        vlog_set_levels(NULL, VLF_ANY_DESTINATION, VLL_DBG);
+    }
     for (i = 1; i < argc; i++) {
         char *msg = vlog_set_levels_from_string(argv[i]);
         if (msg) {
@@ -791,7 +795,7 @@ vlog_init(void)
 
         unixctl_command_register(
             "vlog/set", "{spec | PATTERN:destination:pattern}",
-            1, INT_MAX, vlog_unixctl_set, NULL);
+            0, INT_MAX, vlog_unixctl_set, NULL);
         unixctl_command_register("vlog/list", "", 0, 0, vlog_unixctl_list,
                                  NULL);
         unixctl_command_register("vlog/list-pattern", "", 0, 0,
@@ -832,6 +836,16 @@ vlog_enable_async(void)
     ovs_mutex_unlock(&log_file_mutex);
 }
 
+void
+vlog_disable_async(void)
+{
+    ovs_mutex_lock(&log_file_mutex);
+    log_async = false;
+    async_append_destroy(log_writer);
+    log_writer = NULL;
+    ovs_mutex_unlock(&log_file_mutex);
+}
+
 /* Print the current logging level for each module. */
 char *
 vlog_get_levels(void)
@@ -839,7 +853,6 @@ vlog_get_levels(void)
     struct ds s = DS_EMPTY_INITIALIZER;
     struct vlog_module *mp;
     struct svec lines = SVEC_EMPTY_INITIALIZER;
-    char *line;
     size_t i;
 
     ds_put_format(&s, "                 console    syslog    file\n");
@@ -865,6 +878,8 @@ vlog_get_levels(void)
     ovs_mutex_unlock(&log_file_mutex);
 
     svec_sort(&lines);
+
+    char *line;
     SVEC_FOR_EACH (i, line, &lines) {
         ds_put_cstr(&s, line);
     }
@@ -937,7 +952,7 @@ format_log_message(const struct vlog_module *module, enum vlog_level level,
     for (p = pattern; *p != '\0'; ) {
         const char *subprogram_name;
         enum { LEFT, RIGHT } justify = RIGHT;
-        int pad = '0';
+        int pad = ' ';
         size_t length, field, used;
 
         if (*p != '%') {

@@ -19,6 +19,10 @@
 
 #include "openvswitch/geneve.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define TUN_METADATA_NUM_OPTS 64
 #define TUN_METADATA_TOT_OPT_SIZE 256
 
@@ -97,5 +101,13 @@ struct tun_metadata_allocation {
     bool valid;                 /* Set to true after any allocation occurs. */
 };
 
+struct tun_metadata_allocation *tun_metadata_allocation_clone(
+    const struct tun_metadata_allocation *);
+void tun_metadata_allocation_copy(struct tun_metadata_allocation *,
+                                  const struct tun_metadata_allocation *);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* tun-metadata.h */

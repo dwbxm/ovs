@@ -20,6 +20,7 @@ AM_CPPFLAGS += $(PTHREAD_INCLUDES)
 AM_CPPFLAGS += $(MSVC_CFLAGS)
 AM_LDFLAGS += $(PTHREAD_LDFLAGS)
 AM_LDFLAGS += $(MSVC64_LDFLAGS)
+PLATFORM = $(MSVC_PLATFORM)
 endif
 
 AM_CPPFLAGS += -I $(top_srcdir)/include
@@ -35,12 +36,17 @@ AM_CFLAGS += $(OVS_CFLAGS)
 
 if DPDK_NETDEV
 AM_CFLAGS += -D_FILE_OFFSET_BITS=64
+DPDKSTRIP_FLAGS = --dpdk
+else
+DPDKSTRIP_FLAGS = --nodpdk
 endif
 
 if NDEBUG
 AM_CPPFLAGS += -DNDEBUG
 AM_CFLAGS += -fomit-frame-pointer
 endif
+
+AM_CTAGSFLAGS = $(OVS_CTAGS_IDENTIFIERS_LIST)
 
 if WIN32
 psep=";"
@@ -66,6 +72,7 @@ PYCOV_CLEAN_FILES = build-aux/check-structs,cover
 EXTRA_DIST = \
 	AUTHORS.rst \
 	CONTRIBUTING.rst \
+	LICENSE \
 	MAINTAINERS.rst \
 	README.rst \
 	NOTICE \
@@ -76,13 +83,10 @@ EXTRA_DIST = \
 	.travis/osx-prepare.sh \
 	appveyor.yml \
 	boot.sh \
-	build-aux/cccl \
-	build-aux/cksum-schema-check \
-	build-aux/calculate-schema-cksum \
-	build-aux/dist-docs \
-	build-aux/sodepends.pl \
-	build-aux/soexpand.pl \
-	build-aux/xml2nroff \
+	poc/builders/Vagrantfile \
+	poc/playbook-centos-builder.yml \
+	poc/playbook-fedora-builder.yml \
+	poc/playbook-ubuntu-builder.yml \
 	$(MAN_FRAGMENTS) \
 	$(MAN_ROOTS) \
 	Vagrantfile \
@@ -106,6 +110,7 @@ MAN_ROOTS =
 noinst_DATA =
 noinst_HEADERS =
 lib_LTLIBRARIES =
+noinst_LTLIBRARIES =
 noinst_man_MANS =
 noinst_PROGRAMS =
 noinst_SCRIPTS =
@@ -120,6 +125,10 @@ check_DATA =
 check_SCRIPTS =
 pkgconfig_DATA =
 FLAKE8_PYFILES =
+
+if ENABLE_SPARSE_BY_DEFAULT
+C ?= 1
+endif
 
 scriptsdir = $(pkgdatadir)/scripts
 completiondir = $(sysconfdir)/bash_completion.d
@@ -136,12 +145,12 @@ ro_shell = printf '\043 Generated automatically -- do not modify!    -*- buffer-
 
 SUFFIXES += .in
 .in:
-	$(AM_V_GEN)$(PERL) $(srcdir)/build-aux/soexpand.pl -I$(srcdir) < $< | \
+	$(AM_V_GEN)PYTHONPATH=$$PYTHONPATH$(psep)$(srcdir)/python $(PYTHON) $(srcdir)/build-aux/soexpand.py -I$(srcdir) < $< | \
+	  $(PYTHON) $(srcdir)/build-aux/dpdkstrip.py $(DPDKSTRIP_FLAGS) | \
 	  sed \
 	    -e 's,[@]PKIDIR[@],$(PKIDIR),g' \
 	    -e 's,[@]LOGDIR[@],$(LOGDIR),g' \
 	    -e 's,[@]DBDIR[@],$(DBDIR),g' \
-	    -e 's,[@]PERL[@],$(PERL),g' \
 	    -e 's,[@]PYTHON[@],$(PYTHON),g' \
 	    -e 's,[@]RUNDIR[@],$(RUNDIR),g' \
 	    -e 's,[@]VERSION[@],$(VERSION),g' \
@@ -166,7 +175,6 @@ SUFFIXES += .xml
 	  PKIDIR='$(PKIDIR)' \
 	  LOGDIR='$(LOGDIR)' \
 	  DBDIR='$(DBDIR)' \
-	  PERL='$(PERL)' \
 	  PYTHON='$(PYTHON)' \
 	  RUNDIR='$(RUNDIR)' \
 	  VERSION='$(VERSION)' \
@@ -191,6 +199,7 @@ dist-hook-git: distfiles
 	  (cat distfiles; sed 's|^|datapath/|' datapath/distfiles) | \
 	    LC_ALL=C sort -u > all-distfiles; \
 	  (cd $(srcdir) && git ls-files) | grep -v '\.gitignore$$' | \
+	    grep -v '\.gitattributes$$' | \
 	    LC_ALL=C sort -u > all-gitfiles; \
 	  LC_ALL=C comm -1 -3 all-distfiles all-gitfiles > missing-distfiles; \
 	  if test -s missing-distfiles; then \
@@ -248,7 +257,7 @@ printf-check:
 	then \
 	  echo "See above for list of violations of the rule that"; \
 	  echo "'z', 't', 'j', 'hh' printf() type modifiers are"; \
-	  echo "forbidden.  See CodingStyle.rst for replacements."; \
+	  echo "forbidden.  See coding-style.rst for replacements."; \
 	  exit 1; \
 	fi
 .PHONY: printf-check
@@ -287,13 +296,39 @@ check-endian:
 	@if test -e $(srcdir)/.git && (git --version) >/dev/null 2>&1 && \
 	  (cd $(srcdir) && git --no-pager grep -l -E \
 	   -e 'BIG_ENDIAN|LITTLE_ENDIAN' --and --not -e 'BYTE_ORDER' | \
-	  $(EGREP) -v '^datapath/'); \
+	  $(EGREP) -v '^datapath/|^include/sparse/rte_'); \
 	then \
 	  echo "See above for list of files that misuse LITTLE""_ENDIAN"; \
 	  echo "or BIG""_ENDIAN.  Please use WORDS_BIGENDIAN instead."; \
 	  exit 1; \
 	fi
 .PHONY: check-endian
+
+ALL_LOCAL += check-echo-n
+check-echo-n:
+	@if test -e $(srcdir)/.git && (git --version) >/dev/null 2>&1 && \
+	  git --no-pager grep -n 'echo'' -n' $(srcdir); \
+	then \
+	  echo "See above for uses for \"echo"" -n\", which is non-POSIX"; \
+	  echo "and does not work with all shells.  Use \"printf\" instead."; \
+	  exit 1; \
+	fi
+.PHONY: check-echo-n
+
+ALL_LOCAL += check-tabs
+check-tabs:
+	@cd $(srcdir); \
+	if test -e .git && (git --version) >/dev/null 2>&1 && \
+	  grep -ln "^	" \
+	    `git ls-files \
+	      | grep -v -f build-aux/initial-tab-whitelist` /dev/null \
+	      | $(EGREP) -v ':[ 	]*/?\*'; \
+	then \
+	  echo "See above for files that use tabs for indentation."; \
+	  echo "Please use spaces instead."; \
+	  exit 1; \
+	fi
+.PHONY: check-tabs
 
 ALL_LOCAL += thread-safety-check
 thread-safety-check:
@@ -311,6 +346,20 @@ thread-safety-check:
 EXTRA_DIST += build-aux/thread-safety-blacklist
 .PHONY: thread-safety-check
 
+# Check that "ip" is used in preference to "ifconfig", because
+# "ifconfig" is not installed ubiquitously anymore.
+ALL_LOCAL += check-ifconfig
+check-ifconfig:
+	@if test -e $(srcdir)/.git && (git --version) >/dev/null 2>&1 && \
+	  (cd $(srcdir) && git --no-pager grep -l -E -e 'ifconfig' | \
+           $(EGREP) -v 'Makefile.am|ovs-vsctl-bashcomp|openvswitch-custom\.te'); \
+	then \
+	  echo "See above for list of files that use or reference"; \
+          echo "'ifconfig'.  Please use 'ip' instead."; \
+	  exit 1; \
+	fi
+.PHONY: check-ifconfig
+
 if HAVE_GROFF
 ALL_LOCAL += manpage-check
 manpage-check: $(man_MANS) $(dist_man_MANS) $(noinst_man_MANS)
@@ -327,7 +376,7 @@ endif
 
 if HAVE_FLAKE8
 ALL_LOCAL += flake8-check
-# http://flake8.readthedocs.org/en/latest/warnings.html
+# http://flake8.readthedocs.org/en/latest/user/error-codes.html
 # All warnings explicitly selected or ignored should be listed below.
 #
 # E***, W*** -- warnings from pep8
@@ -339,6 +388,7 @@ ALL_LOCAL += flake8-check
 #   E128 continuation line under-indented for visual indent
 #   E129 visually indented line with same indent as next logical line
 #   E131 continuation line unaligned for hanging indent
+#   E722 do not use bare except, specify exception instead
 #   W503 line break before binary operator
 # F*** -- warnings native to flake8
 #   F811 redefinition of unused <name> from line <N> (only from flake8 v2.0)
@@ -349,9 +399,9 @@ ALL_LOCAL += flake8-check
 #   H233 Python 3.x incompatible use of print operator
 #   H238 old style class declaration, use new style (inherit from `object`)
 FLAKE8_SELECT = H231,H232,H233,H238
-FLAKE8_IGNORE = E121,E123,E125,E126,E127,E128,E129,E131,W503,F811,D,H,I
+FLAKE8_IGNORE = E121,E123,E125,E126,E127,E128,E129,E131,E722,W503,F811,D,H,I
 flake8-check: $(FLAKE8_PYFILES)
-	$(AM_V_GEN) \
+	$(FLAKE8_WERROR)$(AM_V_GEN) \
 	  src='$^' && \
 	  flake8 $$src --select=$(FLAKE8_SELECT) $(FLAKE8_FLAGS) && \
 	  flake8 $$src --ignore=$(FLAKE8_IGNORE) $(FLAKE8_FLAGS) && \
@@ -360,8 +410,8 @@ endif
 CLEANFILES += flake8-check
 
 include $(srcdir)/manpages.mk
-$(srcdir)/manpages.mk: $(MAN_ROOTS) build-aux/sodepends.pl
-	@$(PERL) $(srcdir)/build-aux/sodepends.pl -I. -I$(srcdir) $(MAN_ROOTS) >$(@F).tmp
+$(srcdir)/manpages.mk: $(MAN_ROOTS) build-aux/sodepends.py python/build/soutil.py
+	@PYTHONPATH=$$PYTHONPATH$(psep)$(srcdir)/python $(PYTHON) $(srcdir)/build-aux/sodepends.py -I. -I$(srcdir) $(MAN_ROOTS) >$(@F).tmp
 	@if cmp -s $(@F).tmp $@; then \
 	  touch $@; \
 	  rm -f $(@F).tmp; \
@@ -372,14 +422,30 @@ CLEANFILES += manpage-dep-check
 
 if VSTUDIO_DDK
 ALL_LOCAL += ovsext
+ARCH = x64
 ovsext: datapath-windows/ovsext.sln $(srcdir)/datapath-windows/include/OvsDpInterface.h
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
+if VSTUDIO_WIN8
+	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
+endif
+if VSTUDIO_WIN8_1
+	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
+endif
+if VSTUDIO_WIN10
+	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Build /property:Configuration="Win10$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
+endif
+
 
 CLEAN_LOCAL += ovsext_clean
 ovsext_clean: datapath-windows/ovsext.sln
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
-	MSBuild.exe //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)"
+if VSTUDIO_WIN8
+	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
+endif
+if VSTUDIO_WIN8_1
+	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win8.1$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
+endif
+if VSTUDIO_WIN10
+	MSBuild.exe //nologo //maxcpucount datapath-windows/ovsext.sln /target:Clean /property:Configuration="Win10$(VSTUDIO_CONFIG)" /property:Version="$(PACKAGE_VERSION)" //p:Platform=$(ARCH)
+endif
 endif
 .PHONY: ovsext
 

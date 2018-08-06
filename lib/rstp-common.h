@@ -238,7 +238,6 @@ struct rstp_bpdu {
     ovs_be16 hello_time;
     ovs_be16 forward_delay;
     uint8_t version1_length;
-    uint8_t padding[7];
 });
 
 enum rstp_info_is {
@@ -262,6 +261,7 @@ struct rstp_port {
     struct rstp *rstp OVS_GUARDED_BY(rstp_mutex);
     struct hmap_node node OVS_GUARDED_BY(rstp_mutex); /* In rstp->ports. */
     void *aux OVS_GUARDED_BY(rstp_mutex);
+    char *port_name;
     struct rstp_bpdu received_bpdu_buffer OVS_GUARDED_BY(rstp_mutex);
     /*************************************************************************
      * MAC status parameters

@@ -27,6 +27,7 @@ struct conn_icmp {
     struct OVS_CT_ENTRY up;
     enum icmp_state state;
 };
+C_ASSERT(offsetof(struct conn_icmp, up) == 0);
 
 static const enum ct_timeout icmp_timeouts[] = {
     [ICMPS_FIRST] = 60 * CT_INTERVAL_SEC,
@@ -60,6 +61,7 @@ BOOLEAN
 OvsConntrackValidateIcmpPacket(const ICMPHdr *icmp)
 {
     if (!icmp) {
+        OVS_LOG_TRACE("Invalid ICMP packet detected, header cannot be NULL");
         return FALSE;
     }
 
@@ -78,7 +80,7 @@ OvsConntrackCreateIcmpEntry(UINT64 now)
     if (!conn) {
         return NULL;
     }
-
+    conn->up = (OVS_CT_ENTRY) {0};
     conn->state = ICMPS_FIRST;
 
     OvsConntrackUpdateExpiration(&conn->up, now,

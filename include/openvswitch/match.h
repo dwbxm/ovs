@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2009-2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,13 @@
 #include "openvswitch/packets.h"
 #include "openvswitch/tun-metadata.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct ds;
+struct ofputil_port_map;
+struct mf_field;
 
 /* A flow classification match.
  *
@@ -39,6 +45,18 @@ struct match {
 
 /* Initializer for a "struct match" that matches every packet. */
 #define MATCH_CATCHALL_INITIALIZER { .flow = { .dl_type = 0 } }
+
+#define MATCH_SET_FIELD_MASKED(match, field, value, msk)      \
+    do {                                                      \
+        (match)->wc.masks.field = (msk);                      \
+        (match)->flow.field = (value) & (msk);                \
+    } while (0)
+
+#define MATCH_SET_FIELD_UINT8(match, field, value)            \
+    MATCH_SET_FIELD_MASKED(match, field, value, UINT8_MAX)
+
+#define MATCH_SET_FIELD_BE32(match, field, value)             \
+    MATCH_SET_FIELD_MASKED(match, field, value, OVS_BE32_MAX)
 
 void match_init(struct match *,
                 const struct flow *, const struct flow_wildcards *);
@@ -85,10 +103,24 @@ void match_set_tun_tos(struct match *match, uint8_t tos);
 void match_set_tun_tos_masked(struct match *match, uint8_t tos, uint8_t mask);
 void match_set_tun_flags(struct match *match, uint16_t flags);
 void match_set_tun_flags_masked(struct match *match, uint16_t flags, uint16_t mask);
+void match_set_tun_tp_dst(struct match *match, ovs_be16 tp_dst);
+void match_set_tun_tp_dst_masked(struct match *match, ovs_be16 port, ovs_be16 mask);
 void match_set_tun_gbp_id_masked(struct match *match, ovs_be16 gbp_id, ovs_be16 mask);
 void match_set_tun_gbp_id(struct match *match, ovs_be16 gbp_id);
 void match_set_tun_gbp_flags_masked(struct match *match, uint8_t flags, uint8_t mask);
 void match_set_tun_gbp_flags(struct match *match, uint8_t flags);
+void match_set_tun_erspan_ver(struct match *match, uint8_t ver);
+void match_set_tun_erspan_ver_masked(struct match *match, uint8_t ver,
+                                     uint8_t mask);
+void match_set_tun_erspan_idx(struct match *match, uint32_t idx);
+void match_set_tun_erspan_idx_masked(struct match *match, uint32_t idx,
+                                     uint32_t mask);
+void match_set_tun_erspan_dir(struct match *match, uint8_t dir);
+void match_set_tun_erspan_dir_masked(struct match *match, uint8_t dir,
+                                     uint8_t mask);
+void match_set_tun_erspan_hwid(struct match *match, uint8_t hwid);
+void match_set_tun_erspan_hwid_masked(struct match *match, uint8_t hwid,
+                                      uint8_t mask);
 void match_set_in_port(struct match *, ofp_port_t ofp_port);
 void match_set_pkt_mark(struct match *, uint32_t pkt_mark);
 void match_set_pkt_mark_masked(struct match *, uint32_t pkt_mark, uint32_t mask);
@@ -115,6 +147,11 @@ void match_set_ct_ipv6_dst(struct match *, const struct in6_addr *);
 void match_set_ct_ipv6_dst_masked(struct match *, const struct in6_addr *,
                                   const struct in6_addr *);
 
+void match_set_packet_type(struct match *, ovs_be32 packet_type);
+void match_set_default_packet_type(struct match *);
+bool match_has_default_packet_type(const struct match *);
+void match_add_ethernet_prereq(struct match *, const struct mf_field *);
+
 void match_set_skb_priority(struct match *, uint32_t skb_priority);
 void match_set_dl_type(struct match *, ovs_be16);
 void match_set_dl_src(struct match *, const struct eth_addr );
@@ -126,11 +163,11 @@ void match_set_dl_dst_masked(struct match *, const struct eth_addr dl_dst,
 void match_set_dl_tci(struct match *, ovs_be16 tci);
 void match_set_dl_tci_masked(struct match *, ovs_be16 tci, ovs_be16 mask);
 void match_set_any_vid(struct match *);
-void match_set_dl_vlan(struct match *, ovs_be16);
+void match_set_dl_vlan(struct match *, ovs_be16, int id);
 void match_set_vlan_vid(struct match *, ovs_be16);
 void match_set_vlan_vid_masked(struct match *, ovs_be16 vid, ovs_be16 mask);
 void match_set_any_pcp(struct match *);
-void match_set_dl_vlan_pcp(struct match *, uint8_t);
+void match_set_dl_vlan_pcp(struct match *, uint8_t, int id);
 void match_set_any_mpls_lse(struct match *, int idx);
 void match_set_mpls_lse(struct match *, int idx, ovs_be32);
 void match_set_any_mpls_label(struct match *, int idx);
@@ -155,7 +192,9 @@ void match_set_nw_dst(struct match *, ovs_be32);
 void match_set_nw_dst_masked(struct match *, ovs_be32 ip, ovs_be32 mask);
 void match_set_nw_dscp(struct match *, uint8_t);
 void match_set_nw_ecn(struct match *, uint8_t);
-void match_set_nw_ttl(struct match *, uint8_t);
+void match_set_nw_ttl(struct match *, uint8_t nw_ttl);
+void match_set_nw_ttl_masked(struct match *, uint8_t nw_ttl, uint8_t mask);
+void match_set_nw_tos_masked(struct match *, uint8_t nw_tos, uint8_t mask);
 void match_set_nw_frag(struct match *, uint8_t nw_frag);
 void match_set_nw_frag_masked(struct match *, uint8_t nw_frag, uint8_t mask);
 void match_set_icmp_type(struct match *, uint8_t);
@@ -186,9 +225,11 @@ uint32_t match_hash(const struct match *, uint32_t basis);
 void match_init_hidden_fields(struct match *);
 bool match_has_default_hidden_fields(const struct match *);
 
-void match_format(const struct match *, struct ds *, int priority);
-char *match_to_string(const struct match *, int priority);
-void match_print(const struct match *);
+void match_format(const struct match *, const struct ofputil_port_map *,
+                  struct ds *, int priority);
+char *match_to_string(const struct match *, const struct ofputil_port_map *,
+                      int priority);
+void match_print(const struct match *, const struct ofputil_port_map *);
 
 /* Compressed match. */
 
@@ -214,9 +255,11 @@ struct minimatch {
         };
         struct miniflow *flows[2];
     };
+    struct tun_metadata_allocation *tun_md;
 };
 
 void minimatch_init(struct minimatch *, const struct match *);
+void minimatch_init_catchall(struct minimatch *);
 void minimatch_clone(struct minimatch *, const struct minimatch *);
 void minimatch_move(struct minimatch *dst, struct minimatch *src);
 void minimatch_destroy(struct minimatch *);
@@ -224,11 +267,20 @@ void minimatch_destroy(struct minimatch *);
 void minimatch_expand(const struct minimatch *, struct match *);
 
 bool minimatch_equal(const struct minimatch *a, const struct minimatch *b);
+uint32_t minimatch_hash(const struct minimatch *, uint32_t basis);
 
 bool minimatch_matches_flow(const struct minimatch *, const struct flow *);
 
 void minimatch_format(const struct minimatch *, const struct tun_table *,
+                      const struct ofputil_port_map *,
                       struct ds *, int priority);
-char *minimatch_to_string(const struct minimatch *, int priority);
+char *minimatch_to_string(const struct minimatch *,
+                          const struct ofputil_port_map *, int priority);
+
+bool minimatch_has_default_hidden_fields(const struct minimatch *);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* match.h */

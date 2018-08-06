@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,9 @@
 #include "openvswitch/meta-flow.h"
 #include "openvswitch/ofp-actions.h"
 #include "openvswitch/ofp-errors.h"
-#include "openvswitch/ofp-util.h"
+#include "openvswitch/ofp-flow.h"
+#include "openvswitch/ofp-parse.h"
+#include "openvswitch/ofp-table.h"
 #include "openvswitch/ofpbuf.h"
 #include "vl-mff-map.h"
 #include "unaligned.h"
@@ -89,14 +91,17 @@ learn_check(const struct ofpact_learn *learn, const struct match *src_match)
  * 'ofpacts' and retains ownership of it.  'fm->ofpacts' will point into the
  * 'ofpacts' buffer.
  *
+ * The caller must eventually destroy fm->match.
+ *
  * The caller has to actually execute 'fm'. */
 void
 learn_execute(const struct ofpact_learn *learn, const struct flow *flow,
               struct ofputil_flow_mod *fm, struct ofpbuf *ofpacts)
 {
     const struct ofpact_learn_spec *spec;
+    struct match match;
 
-    match_init_catchall(&fm->match);
+    match_init_catchall(&match);
     fm->priority = learn->priority;
     fm->cookie = htonll(0);
     fm->cookie_mask = htonll(0);
@@ -138,9 +143,10 @@ learn_execute(const struct ofpact_learn *learn, const struct flow *flow,
 
         switch (spec->dst_type) {
         case NX_LEARN_DST_MATCH:
-            mf_write_subfield(&spec->dst, &value, &fm->match);
+            mf_write_subfield(&spec->dst, &value, &match);
+            match_add_ethernet_prereq(&match, spec->dst.field);
             mf_vl_mff_set_tlv_bitmap(
-                spec->dst.field, &fm->match.flow.tunnel.metadata.present.map);
+                spec->dst.field, &match.flow.tunnel.metadata.present.map);
             break;
 
         case NX_LEARN_DST_LOAD:
@@ -170,6 +176,7 @@ learn_execute(const struct ofpact_learn *learn, const struct flow *flow,
         }
     }
 
+    minimatch_init(&fm->match, &match);
     fm->ofpacts = ofpacts->data;
     fm->ofpacts_len = ofpacts->size;
 }
@@ -232,15 +239,18 @@ learn_parse_load_immediate(union mf_subvalue *imm, const char *s,
  * error.  The caller is responsible for freeing the returned string. */
 static char * OVS_WARN_UNUSED_RESULT
 learn_parse_spec(const char *orig, char *name, char *value,
+                 const struct ofputil_port_map *port_map,
                  struct ofpact_learn_spec *spec,
                  struct ofpbuf *ofpacts, struct match *match)
 {
     /* Parse destination and check prerequisites. */
     struct mf_subfield dst;
-    char *error;
 
-    error = mf_parse_subfield(&dst, name);
-    if (!error) {
+    char *error = mf_parse_subfield(&dst, name);
+    bool parse_error = error != NULL;
+    free(error);
+
+    if (!parse_error) {
         if (!mf_nxm_header(dst.field->id)) {
             return xasprintf("%s: experimenter OXM field '%s' not supported",
                              orig, name);
@@ -260,7 +270,8 @@ learn_parse_spec(const char *orig, char *name, char *value,
                 /* Try an immediate value. */
                 if (dst.ofs == 0 && dst.n_bits == dst.field->n_bits) {
                     /* Full field value. */
-                    imm_error = mf_parse_value(dst.field, value, &imm);
+                    imm_error = mf_parse_value(dst.field, value, port_map,
+                                               &imm);
                 } else {
                     char *tail;
                     /* Partial field value. */
@@ -277,7 +288,7 @@ learn_parse_spec(const char *orig, char *name, char *value,
                         struct ds ds;
 
                         ds_init(&ds);
-                        mf_format(dst.field, &imm, NULL, &ds);
+                        mf_format(dst.field, &imm, NULL, NULL, &ds);
                         imm_error = xasprintf("%s: value %s does not fit into %d bits",
                                               orig, ds_cstr(&ds), dst.n_bits);
                         ds_destroy(&ds);
@@ -337,14 +348,13 @@ learn_parse_spec(const char *orig, char *name, char *value,
                                  name, value);
             }
 
-            char *error = learn_parse_load_immediate(&imm, dst_value + 2, value, spec,
-                                                     ofpacts);
+            error = learn_parse_load_immediate(&imm, dst_value + 2, value, spec,
+                                               ofpacts);
             if (error) {
                 return error;
             }
         } else {
             struct ofpact_reg_move move;
-            char *error;
 
             error = nxm_parse_reg_move(&move, value);
             if (error) {
@@ -358,7 +368,7 @@ learn_parse_spec(const char *orig, char *name, char *value,
             spec->dst = move.dst;
         }
     } else if (!strcmp(name, "output")) {
-        char *error = mf_parse_subfield(&spec->src, value);
+        error = mf_parse_subfield(&spec->src, value);
         if (error) {
             return error;
         }
@@ -376,7 +386,9 @@ learn_parse_spec(const char *orig, char *name, char *value,
 /* Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
 static char * OVS_WARN_UNUSED_RESULT
-learn_parse__(char *orig, char *arg, struct ofpbuf *ofpacts)
+learn_parse__(char *orig, char *arg, const struct ofputil_port_map *port_map,
+              const struct ofputil_table_map *table_map,
+              struct ofpbuf *ofpacts)
 {
     struct ofpact_learn *learn;
     struct match match;
@@ -391,8 +403,10 @@ learn_parse__(char *orig, char *arg, struct ofpbuf *ofpacts)
     match_init_catchall(&match);
     while (ofputil_parse_key_value(&arg, &name, &value)) {
         if (!strcmp(name, "table")) {
-            learn->table_id = atoi(value);
-            if (learn->table_id == 255) {
+            if (!ofputil_table_from_string(value, table_map,
+                                           &learn->table_id)) {
+                return xasprintf("unknown table \"%s\"", value);
+            } else if (learn->table_id == 255) {
                 return xasprintf("%s: table id 255 not valid for `learn' "
                                  "action", orig);
             }
@@ -412,12 +426,29 @@ learn_parse__(char *orig, char *arg, struct ofpbuf *ofpacts)
             learn->flags |= NX_LEARN_F_SEND_FLOW_REM;
         } else if (!strcmp(name, "delete_learned")) {
             learn->flags |= NX_LEARN_F_DELETE_LEARNED;
+        } else if (!strcmp(name, "limit")) {
+            learn->limit = atoi(value);
+        } else if (!strcmp(name, "result_dst")) {
+            char *error;
+            learn->flags |= NX_LEARN_F_WRITE_RESULT;
+            error = mf_parse_subfield(&learn->result_dst, value);
+            if (error) {
+                return error;
+            }
+            if (!learn->result_dst.field->writable) {
+                return xasprintf("%s is read-only", value);
+            }
+            if (learn->result_dst.n_bits != 1) {
+                return xasprintf("result_dst in 'learn' action must be a "
+                                 "single bit");
+            }
         } else {
             struct ofpact_learn_spec *spec;
             char *error;
 
             spec = ofpbuf_put_zeros(ofpacts, sizeof *spec);
-            error = learn_parse_spec(orig, name, value, spec, ofpacts, &match);
+            error = learn_parse_spec(orig, name, value, port_map,
+                                     spec, ofpacts, &match);
             if (error) {
                 return error;
             }
@@ -442,10 +473,12 @@ learn_parse__(char *orig, char *arg, struct ofpbuf *ofpacts)
  *
  * Modifies 'arg'. */
 char * OVS_WARN_UNUSED_RESULT
-learn_parse(char *arg, struct ofpbuf *ofpacts)
+learn_parse(char *arg, const struct ofputil_port_map *port_map,
+            const struct ofputil_table_map *table_map,
+            struct ofpbuf *ofpacts)
 {
     char *orig = xstrdup(arg);
-    char *error = learn_parse__(orig, arg, ofpacts);
+    char *error = learn_parse__(orig, arg, port_map, table_map, ofpacts);
     free(orig);
     return error;
 }
@@ -453,16 +486,19 @@ learn_parse(char *arg, struct ofpbuf *ofpacts)
 /* Appends a description of 'learn' to 's', in the format that ovs-ofctl(8)
  * describes. */
 void
-learn_format(const struct ofpact_learn *learn, struct ds *s)
+learn_format(const struct ofpact_learn *learn,
+             const struct ofputil_port_map *port_map,
+             const struct ofputil_table_map *table_map,
+             struct ds *s)
 {
     const struct ofpact_learn_spec *spec;
     struct match match;
 
     match_init_catchall(&match);
 
-    ds_put_format(s, "%slearn(%s%stable=%s%"PRIu8,
-                  colors.learn, colors.end, colors.special, colors.end,
-                  learn->table_id);
+    ds_put_format(s, "%slearn(%s%stable=%s",
+                  colors.learn, colors.end, colors.special, colors.end);
+    ofputil_format_table(learn->table_id, table_map, s);
     if (learn->idle_timeout != OFP_FLOW_PERMANENT) {
         ds_put_format(s, ",%sidle_timeout=%s%"PRIu16,
                       colors.param, colors.end, learn->idle_timeout);
@@ -493,6 +529,14 @@ learn_format(const struct ofpact_learn *learn, struct ds *s)
         ds_put_format(s, ",%scookie=%s%#"PRIx64,
                       colors.param, colors.end, ntohll(learn->cookie));
     }
+    if (learn->limit != 0) {
+        ds_put_format(s, ",%slimit=%s%"PRIu32,
+                      colors.param, colors.end, learn->limit);
+    }
+    if (learn->flags & NX_LEARN_F_WRITE_RESULT) {
+        ds_put_format(s, ",%sresult_dst=%s", colors.param, colors.end);
+        mf_format_subfield(&learn->result_dst, s);
+    }
 
     OFPACT_LEARN_SPEC_FOR_EACH (spec, learn) {
         unsigned int n_bytes = DIV_ROUND_UP(spec->n_bits, 8);
@@ -509,7 +553,7 @@ learn_format(const struct ofpact_learn *learn, struct ds *s)
                        ofpact_learn_spec_imm(spec), n_bytes);
                 ds_put_format(s, "%s%s=%s", colors.param,
                               spec->dst.field->name, colors.end);
-                mf_format(spec->dst.field, &value, NULL, s);
+                mf_format(spec->dst.field, &value, NULL, port_map, s);
             } else {
                 ds_put_format(s, "%s", colors.param);
                 mf_format_subfield(&spec->dst, s);

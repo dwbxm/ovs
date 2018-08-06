@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <net/if.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
@@ -122,7 +123,7 @@ netdev_tnl_ip_extract_tnl_md(struct dp_packet *packet, struct flow_tnl *tnl,
         tnl->ip_tos = ntohl(tc_flow) >> 20;
         tnl->ip_ttl = ip6->ip6_hlim;
 
-        *hlen += IPV6_HEADER_LEN;
+        *hlen += packet->l4_ofs - packet->l3_ofs;
 
     } else {
         VLOG_WARN_RL(&err_rl, "ipv4 packet has invalid version (%d)",
@@ -139,7 +140,7 @@ netdev_tnl_ip_extract_tnl_md(struct dp_packet *packet, struct flow_tnl *tnl,
  *
  * This function sets the IP header's ip_tot_len field (which should be zeroed
  * as part of 'header') and puts its value into '*ip_tot_size' as well.  Also
- * updates IP header checksum.
+ * updates IP header checksum, as well as the l3 and l4 offsets in 'packet'.
  *
  * Return pointer to the L4 header added to 'packet'. */
 void *
@@ -154,17 +155,23 @@ netdev_tnl_push_ip_header(struct dp_packet *packet,
     *ip_tot_size = dp_packet_size(packet) - sizeof (struct eth_header);
 
     memcpy(eth, header, size);
+    /* The encapsulated packet has type Ethernet. Adjust dp_packet. */
+    packet->packet_type = htonl(PT_ETH);
+    dp_packet_reset_offsets(packet);
+    packet->l3_ofs = sizeof (struct eth_header);
 
     if (netdev_tnl_is_header_ipv6(header)) {
         ip6 = netdev_tnl_ipv6_hdr(eth);
         *ip_tot_size -= IPV6_HEADER_LEN;
         ip6->ip6_plen = htons(*ip_tot_size);
+        packet->l4_ofs = dp_packet_size(packet) - *ip_tot_size;
         return ip6 + 1;
     } else {
         ip = netdev_tnl_ip_hdr(eth);
         ip->ip_tot_len = htons(*ip_tot_size);
         ip->ip_csum = recalc_csum16(ip->ip_csum, 0, ip->ip_tot_len);
         *ip_tot_size -= IP_HEADER_LEN;
+        packet->l4_ofs = dp_packet_size(packet) - *ip_tot_size;
         return ip + 1;
     }
 }
@@ -191,7 +198,7 @@ udp_extract_tnl_md(struct dp_packet *packet, struct flow_tnl *tnl,
 
             csum = csum_continue(csum, udp, dp_packet_size(packet) -
                                  ((const unsigned char *)udp -
-                                  (const unsigned char *)dp_packet_l2(packet)
+                                  (const unsigned char *)dp_packet_eth(packet)
                                  ));
             if (csum_finish(csum)) {
                 return NULL;
@@ -208,7 +215,8 @@ udp_extract_tnl_md(struct dp_packet *packet, struct flow_tnl *tnl,
 
 
 void
-netdev_tnl_push_udp_header(struct dp_packet *packet,
+netdev_tnl_push_udp_header(const struct netdev *netdev OVS_UNUSED,
+                           struct dp_packet *packet,
                            const struct ovs_action_push_tnl *data)
 {
     struct udp_header *udp;
@@ -345,6 +353,7 @@ parse_gre_header(struct dp_packet *packet,
     ovs_16aligned_be32 *options;
     int hlen;
     unsigned int ulen;
+    uint16_t greh_protocol;
 
     greh = netdev_tnl_ip_extract_tnl_md(packet, tnl, &ulen);
     if (!greh) {
@@ -352,10 +361,6 @@ parse_gre_header(struct dp_packet *packet,
     }
 
     if (greh->flags & ~(htons(GRE_CSUM | GRE_KEY | GRE_SEQ))) {
-        return -EINVAL;
-    }
-
-    if (greh->protocol != htons(ETH_TYPE_TEB)) {
         return -EINVAL;
     }
 
@@ -370,7 +375,7 @@ parse_gre_header(struct dp_packet *packet,
 
         pkt_csum = csum(greh, dp_packet_size(packet) -
                               ((const unsigned char *)greh -
-                               (const unsigned char *)dp_packet_l2(packet)));
+                               (const unsigned char *)dp_packet_eth(packet)));
         if (pkt_csum) {
             return -EINVAL;
         }
@@ -386,6 +391,17 @@ parse_gre_header(struct dp_packet *packet,
 
     if (greh->flags & htons(GRE_SEQ)) {
         options++;
+    }
+
+    /* Set the new packet type depending on the GRE protocol field. */
+    greh_protocol = ntohs(greh->protocol);
+    if (greh_protocol == ETH_TYPE_TEB) {
+        packet->packet_type = htonl(PT_ETH);
+    } else if (greh_protocol >= ETH_TYPE_MIN) {
+        /* Allow all GRE protocol values above 0x5ff as Ethertypes. */
+        packet->packet_type = PACKET_TYPE_BE(OFPHTN_ETHERTYPE, greh_protocol);
+    } else {
+        return -EINVAL;
     }
 
     return hlen;
@@ -420,9 +436,12 @@ err:
 }
 
 void
-netdev_gre_push_header(struct dp_packet *packet,
+netdev_gre_push_header(const struct netdev *netdev,
+                       struct dp_packet *packet,
                        const struct ovs_action_push_tnl *data)
 {
+    struct netdev_vport *dev = netdev_vport_cast(netdev);
+    struct netdev_tunnel_config *tnl_cfg;
     struct gre_base_hdr *greh;
     int ip_tot_size;
 
@@ -431,6 +450,15 @@ netdev_gre_push_header(struct dp_packet *packet,
     if (greh->flags & htons(GRE_CSUM)) {
         ovs_be16 *csum_opt = (ovs_be16 *) (greh + 1);
         *csum_opt = csum(greh, ip_tot_size);
+    }
+
+    if (greh->flags & htons(GRE_SEQ)) {
+        /* Last 4 byte is GRE seqno */
+        int seq_ofs = gre_header_len(greh->flags) - 4;
+        ovs_16aligned_be32 *seq_opt =
+            ALIGNED_CAST(ovs_16aligned_be32 *, (char *)greh + seq_ofs);
+        tnl_cfg = &dev->tnl_cfg;
+        put_16aligned_be32(seq_opt, htonl(tnl_cfg->seqno++));
     }
 }
 
@@ -451,7 +479,14 @@ netdev_gre_build_header(const struct netdev *netdev,
 
     greh = netdev_tnl_ip_build_header(data, params, IPPROTO_GRE);
 
-    greh->protocol = htons(ETH_TYPE_TEB);
+    if (params->flow->packet_type == htonl(PT_ETH)) {
+        greh->protocol = htons(ETH_TYPE_TEB);
+    } else if (pt_ns(params->flow->packet_type) == OFPHTN_ETHERTYPE) {
+        greh->protocol = pt_ns_type_be(params->flow->packet_type);
+    } else {
+        ovs_mutex_unlock(&dev->mutex);
+        return 1;
+    }
     greh->flags = 0;
 
     options = (ovs_16aligned_be32 *) (greh + 1);
@@ -467,12 +502,208 @@ netdev_gre_build_header(const struct netdev *netdev,
         options++;
     }
 
+    if (tnl_cfg->set_seq) {
+        greh->flags |= htons(GRE_SEQ);
+        /* seqno is updated at push header */
+        options++;
+    }
+
     ovs_mutex_unlock(&dev->mutex);
 
     hlen = (uint8_t *) options - (uint8_t *) greh;
 
     data->header_len += hlen;
-    data->tnl_type = OVS_VPORT_TYPE_GRE;
+    if (!params->is_ipv6) {
+        data->tnl_type = OVS_VPORT_TYPE_GRE;
+    } else {
+        data->tnl_type = OVS_VPORT_TYPE_IP6GRE;
+    }
+    return 0;
+}
+
+struct dp_packet *
+netdev_erspan_pop_header(struct dp_packet *packet)
+{
+    const struct gre_base_hdr *greh;
+    const struct erspan_base_hdr *ersh;
+    struct pkt_metadata *md = &packet->md;
+    struct flow_tnl *tnl = &md->tunnel;
+    int hlen = sizeof(struct eth_header);
+    unsigned int ulen;
+    uint16_t greh_protocol;
+
+    hlen += netdev_tnl_is_header_ipv6(dp_packet_data(packet)) ?
+            IPV6_HEADER_LEN : IP_HEADER_LEN;
+
+    pkt_metadata_init_tnl(md);
+    if (hlen > dp_packet_size(packet)) {
+        goto err;
+    }
+
+    greh = netdev_tnl_ip_extract_tnl_md(packet, tnl, &ulen);
+    if (!greh) {
+        goto err;
+    }
+
+    greh_protocol = ntohs(greh->protocol);
+    if (greh_protocol != ETH_TYPE_ERSPAN1 &&
+        greh_protocol != ETH_TYPE_ERSPAN2) {
+        goto err;
+    }
+
+    if (greh->flags & ~htons(GRE_SEQ)) {
+        goto err;
+    }
+
+    ersh = ERSPAN_HDR(greh);
+    tnl->tun_id = be16_to_be64(htons(get_sid(ersh)));
+    tnl->erspan_ver = ersh->ver;
+
+    if (ersh->ver == 1) {
+        ovs_16aligned_be32 *index = ALIGNED_CAST(ovs_16aligned_be32 *,
+                                                 ersh + 1);
+        tnl->erspan_idx = ntohl(get_16aligned_be32(index));
+        tnl->flags |= FLOW_TNL_F_KEY;
+        hlen = ulen + ERSPAN_GREHDR_LEN + sizeof *ersh + ERSPAN_V1_MDSIZE;
+    } else if (ersh->ver == 2) {
+        struct erspan_md2 *md2 = ALIGNED_CAST(struct erspan_md2 *, ersh + 1);
+        tnl->erspan_dir = md2->dir;
+        tnl->erspan_hwid = get_hwid(md2);
+        tnl->flags |= FLOW_TNL_F_KEY;
+        hlen = ulen + ERSPAN_GREHDR_LEN + sizeof *ersh + ERSPAN_V2_MDSIZE;
+    } else {
+        VLOG_WARN_RL(&err_rl, "ERSPAN version error %d", ersh->ver);
+        goto err;
+    }
+
+    if (hlen > dp_packet_size(packet)) {
+        goto err;
+    }
+
+    dp_packet_reset_packet(packet, hlen);
+
+    return packet;
+err:
+    dp_packet_delete(packet);
+    return NULL;
+}
+
+void
+netdev_erspan_push_header(const struct netdev *netdev,
+                          struct dp_packet *packet,
+                          const struct ovs_action_push_tnl *data)
+{
+    struct netdev_vport *dev = netdev_vport_cast(netdev);
+    struct netdev_tunnel_config *tnl_cfg;
+    struct erspan_base_hdr *ersh;
+    struct gre_base_hdr *greh;
+    struct erspan_md2 *md2;
+    int ip_tot_size;
+
+    greh = netdev_tnl_push_ip_header(packet, data->header,
+                                     data->header_len, &ip_tot_size);
+
+    /* update GRE seqno */
+    tnl_cfg = &dev->tnl_cfg;
+    ovs_16aligned_be32 *seqno = (ovs_16aligned_be32 *) (greh + 1);
+    put_16aligned_be32(seqno, htonl(tnl_cfg->seqno++));
+
+    /* update v2 timestamp */
+    if (greh->protocol == htons(ETH_TYPE_ERSPAN2)) {
+        ersh = ERSPAN_HDR(greh);
+        md2 = ALIGNED_CAST(struct erspan_md2 *, ersh + 1);
+        put_16aligned_be32(&md2->timestamp, get_erspan_ts(ERSPAN_100US));
+    }
+}
+
+int
+netdev_erspan_build_header(const struct netdev *netdev,
+                        struct ovs_action_push_tnl *data,
+                        const struct netdev_tnl_build_header_params *params)
+{
+    struct netdev_vport *dev = netdev_vport_cast(netdev);
+    struct netdev_tunnel_config *tnl_cfg;
+    struct gre_base_hdr *greh;
+    struct erspan_base_hdr *ersh;
+    unsigned int hlen;
+    uint32_t tun_id;
+    int erspan_ver;
+    uint16_t sid;
+
+    /* XXX: RCUfy tnl_cfg. */
+    ovs_mutex_lock(&dev->mutex);
+    tnl_cfg = &dev->tnl_cfg;
+    greh = netdev_tnl_ip_build_header(data, params, IPPROTO_GRE);
+    ersh = ERSPAN_HDR(greh);
+
+    tun_id = ntohl(be64_to_be32(params->flow->tunnel.tun_id));
+    /* ERSPAN only has 10-bit session ID */
+    if (tun_id & ~ERSPAN_SID_MASK) {
+        ovs_mutex_unlock(&dev->mutex);
+        return 1;
+    } else {
+        sid = (uint16_t) tun_id;
+    }
+
+    if (tnl_cfg->erspan_ver_flow) {
+        erspan_ver = params->flow->tunnel.erspan_ver;
+    } else {
+        erspan_ver = tnl_cfg->erspan_ver;
+    }
+
+    if (erspan_ver == 1) {
+        greh->protocol = htons(ETH_TYPE_ERSPAN1);
+        greh->flags = htons(GRE_SEQ);
+        ersh->ver = 1;
+        set_sid(ersh, sid);
+
+        uint32_t erspan_idx = (tnl_cfg->erspan_idx_flow
+                          ? params->flow->tunnel.erspan_idx
+                          : tnl_cfg->erspan_idx);
+        put_16aligned_be32(ALIGNED_CAST(ovs_16aligned_be32 *, ersh + 1),
+                           htonl(erspan_idx));
+
+        hlen = ERSPAN_GREHDR_LEN + sizeof *ersh + ERSPAN_V1_MDSIZE;
+    } else if (erspan_ver == 2) {
+        struct erspan_md2 *md2 = ALIGNED_CAST(struct erspan_md2 *, ersh + 1);
+
+        greh->protocol = htons(ETH_TYPE_ERSPAN2);
+        greh->flags = htons(GRE_SEQ);
+        ersh->ver = 2;
+        set_sid(ersh, sid);
+
+        md2->sgt = 0; /* security group tag */
+        md2->gra = 0;
+        put_16aligned_be32(&md2->timestamp, 0);
+
+        if (tnl_cfg->erspan_hwid_flow) {
+            set_hwid(md2, params->flow->tunnel.erspan_hwid);
+        } else {
+            set_hwid(md2, tnl_cfg->erspan_hwid);
+        }
+
+        if (tnl_cfg->erspan_dir_flow) {
+            md2->dir = params->flow->tunnel.erspan_dir;
+        } else {
+            md2->dir = tnl_cfg->erspan_dir;
+        }
+
+        hlen = ERSPAN_GREHDR_LEN + sizeof *ersh + ERSPAN_V2_MDSIZE;
+    } else {
+        VLOG_WARN_RL(&err_rl, "ERSPAN version error %d", tnl_cfg->erspan_ver);
+        ovs_mutex_unlock(&dev->mutex);
+        return 1;
+    }
+
+    ovs_mutex_unlock(&dev->mutex);
+
+    data->header_len += hlen;
+
+    if (params->is_ipv6) {
+        data->tnl_type = OVS_VPORT_TYPE_IP6ERSPAN;
+    } else {
+        data->tnl_type = OVS_VPORT_TYPE_ERSPAN;
+    }
     return 0;
 }
 
@@ -483,6 +714,11 @@ netdev_vxlan_pop_header(struct dp_packet *packet)
     struct flow_tnl *tnl = &md->tunnel;
     struct vxlanhdr *vxh;
     unsigned int hlen;
+    ovs_be32 vx_flags;
+    enum packet_type next_pt = PT_ETH;
+
+    ovs_assert(packet->l3_ofs > 0);
+    ovs_assert(packet->l4_ofs > 0);
 
     pkt_metadata_init_tnl(md);
     if (VXLAN_HLEN > dp_packet_l4_size(packet)) {
@@ -494,17 +730,46 @@ netdev_vxlan_pop_header(struct dp_packet *packet)
         goto err;
     }
 
-    if (get_16aligned_be32(&vxh->vx_flags) != htonl(VXLAN_FLAGS) ||
+    vx_flags = get_16aligned_be32(&vxh->vx_flags);
+    if (vx_flags & htonl(VXLAN_HF_GPE)) {
+        vx_flags &= htonl(~VXLAN_GPE_USED_BITS);
+        /* Drop the OAM packets */
+        if (vxh->vx_gpe.flags & VXLAN_GPE_FLAGS_O) {
+            goto err;
+        }
+        switch (vxh->vx_gpe.next_protocol) {
+        case VXLAN_GPE_NP_IPV4:
+            next_pt = PT_IPV4;
+            break;
+        case VXLAN_GPE_NP_IPV6:
+            next_pt = PT_IPV6;
+            break;
+        case VXLAN_GPE_NP_NSH:
+            next_pt = PT_NSH;
+            break;
+        case VXLAN_GPE_NP_ETHERNET:
+            next_pt = PT_ETH;
+            break;
+        default:
+            goto err;
+        }
+    }
+
+    if (vx_flags != htonl(VXLAN_FLAGS) ||
        (get_16aligned_be32(&vxh->vx_vni) & htonl(0xff))) {
         VLOG_WARN_RL(&err_rl, "invalid vxlan flags=%#x vni=%#x\n",
-                     ntohl(get_16aligned_be32(&vxh->vx_flags)),
+                     ntohl(vx_flags),
                      ntohl(get_16aligned_be32(&vxh->vx_vni)));
         goto err;
     }
     tnl->tun_id = htonll(ntohl(get_16aligned_be32(&vxh->vx_vni)) >> 8);
     tnl->flags |= FLOW_TNL_F_KEY;
 
+    packet->packet_type = htonl(next_pt);
     dp_packet_reset_packet(packet, hlen + VXLAN_HLEN);
+    if (next_pt != PT_ETH) {
+        packet->l3_ofs = 0;
+    }
 
     return packet;
 err:
@@ -527,13 +792,46 @@ netdev_vxlan_build_header(const struct netdev *netdev,
 
     vxh = udp_build_header(tnl_cfg, data, params);
 
-    put_16aligned_be32(&vxh->vx_flags, htonl(VXLAN_FLAGS));
-    put_16aligned_be32(&vxh->vx_vni, htonl(ntohll(params->flow->tunnel.tun_id) << 8));
+    if (tnl_cfg->exts & (1 << OVS_VXLAN_EXT_GPE)) {
+        put_16aligned_be32(&vxh->vx_flags, htonl(VXLAN_FLAGS | VXLAN_HF_GPE));
+        put_16aligned_be32(&vxh->vx_vni,
+                           htonl(ntohll(params->flow->tunnel.tun_id) << 8));
+        if (params->flow->packet_type == htonl(PT_ETH)) {
+            vxh->vx_gpe.next_protocol = VXLAN_GPE_NP_ETHERNET;
+        } else if (pt_ns(params->flow->packet_type) == OFPHTN_ETHERTYPE) {
+            switch (pt_ns_type(params->flow->packet_type)) {
+            case ETH_TYPE_IP:
+                vxh->vx_gpe.next_protocol = VXLAN_GPE_NP_IPV4;
+                break;
+            case ETH_TYPE_IPV6:
+                vxh->vx_gpe.next_protocol = VXLAN_GPE_NP_IPV6;
+                break;
+            case ETH_TYPE_NSH:
+                vxh->vx_gpe.next_protocol = VXLAN_GPE_NP_NSH;
+                break;
+            case ETH_TYPE_TEB:
+                vxh->vx_gpe.next_protocol = VXLAN_GPE_NP_ETHERNET;
+                break;
+            default:
+                goto drop;
+            }
+        } else {
+            goto drop;
+        }
+    } else {
+        put_16aligned_be32(&vxh->vx_flags, htonl(VXLAN_FLAGS));
+        put_16aligned_be32(&vxh->vx_vni,
+                           htonl(ntohll(params->flow->tunnel.tun_id) << 8));
+    }
 
     ovs_mutex_unlock(&dev->mutex);
     data->header_len += sizeof *vxh;
     data->tnl_type = OVS_VPORT_TYPE_VXLAN;
     return 0;
+
+drop:
+    ovs_mutex_unlock(&dev->mutex);
+    return 1;
 }
 
 struct dp_packet *
@@ -583,6 +881,7 @@ netdev_geneve_pop_header(struct dp_packet *packet)
     tnl->metadata.present.len = opts_len;
     tnl->flags |= FLOW_TNL_F_UDPIF;
 
+    packet->packet_type = htonl(PT_ETH);
     dp_packet_reset_packet(packet, hlen);
 
     return packet;

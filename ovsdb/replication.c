@@ -1,5 +1,5 @@
 /*
- * (c) Copyright 2016 Hewlett Packard Enterprise Development LP
+ * (c) Copyright 2016, 2017 Hewlett Packard Enterprise Development LP
  * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2016, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -118,10 +118,9 @@ replication_init(const char *sync_from_, const char *exclude_tables,
 {
     free(sync_from);
     sync_from = xstrdup(sync_from_);
-    char *err = set_blacklist_tables(exclude_tables, false);
     /* Caller should have verified that the 'exclude_tables' is
      * parseable. An error here is unexpected. */
-    ovs_assert(!err);
+    ovs_assert(!set_blacklist_tables(exclude_tables, false));
 
     replication_dbs_destroy();
 
@@ -143,6 +142,30 @@ void
 replication_add_local_db(const char *database, struct ovsdb *db)
 {
     shash_add_assert(&local_dbs, database, db);
+}
+
+static void
+send_schema_requests(const struct json *result)
+{
+    for (size_t i = 0; i < result->array.n; i++) {
+        const struct json *name = result->array.elems[i];
+        if (name->type == JSON_STRING) {
+            /* Send one schema request for each remote DB. */
+            const char *db_name = json_string(name);
+            struct ovsdb *db = find_db(db_name);
+            if (db) {
+                struct jsonrpc_msg *request =
+                    jsonrpc_create_request(
+                        "get_schema",
+                        json_array_create_1(
+                            json_string_create(db_name)),
+                        NULL);
+
+                request_ids_add(request->id, db);
+                jsonrpc_session_send(session, request);
+            }
+        }
+    }
 }
 
 void
@@ -180,13 +203,13 @@ replication_run(void)
         if (msg->type == JSONRPC_NOTIFY && state != RPL_S_ERR
             && !strcmp(msg->method, "update")) {
             if (msg->params->type == JSON_ARRAY
-                && msg->params->u.array.n == 2
-                && msg->params->u.array.elems[0]->type == JSON_STRING) {
-                char *db_name = msg->params->u.array.elems[0]->u.string;
+                && msg->params->array.n == 2
+                && msg->params->array.elems[0]->type == JSON_STRING) {
+                char *db_name = msg->params->array.elems[0]->string;
                 struct ovsdb *db = find_db(db_name);
                 if (db) {
                     struct ovsdb_error *error;
-                    error = process_notification(msg->params->u.array.elems[1],
+                    error = process_notification(msg->params->array.elems[1],
                                                  db);
                     if (error) {
                         ovsdb_error_assert(error);
@@ -245,26 +268,7 @@ replication_run(void)
                     ovsdb_error_assert(error);
                     state = RPL_S_ERR;
                 } else {
-                    size_t i;
-                    for (i = 0; i < msg->result->u.array.n; i++) {
-                        const struct json *name = msg->result->u.array.elems[i];
-                        if (name->type == JSON_STRING) {
-                            /* Send one schema request for each remote DB. */
-                            const char *db_name = json_string(name);
-                            struct ovsdb *db = find_db(db_name);
-                            if (db) {
-                                struct jsonrpc_msg *request =
-                                    jsonrpc_create_request(
-                                        "get_schema",
-                                        json_array_create_1(
-                                            json_string_create(db_name)),
-                                        NULL);
-
-                                request_ids_add(request->id, db);
-                                jsonrpc_session_send(session, request);
-                            }
-                        }
-                    }
+                    send_schema_requests(msg->result);
                     VLOG_DBG("Send schema requests");
                     state = RPL_S_SCHEMA_REQUESTED;
                 }
@@ -299,7 +303,7 @@ replication_run(void)
 
                     SHASH_FOR_EACH_SAFE (node, next, replication_dbs) {
                         db = node->data;
-                        struct ovsdb_error *error = reset_database(db);
+                        error = reset_database(db);
                         if (error) {
                             const char *db_name = db->schema->name;
                             shash_find_and_delete(replication_dbs, db_name);
@@ -315,7 +319,6 @@ replication_run(void)
                     } else {
                         SHASH_FOR_EACH (node, replication_dbs) {
                             db = node->data;
-                            struct ovsdb *db = node->data;
                             struct jsonrpc_msg *request =
                                 create_monitor_request(db);
 
@@ -525,14 +528,14 @@ reset_database(struct ovsdb *db)
         /* Delete all rows if the table is not blacklisted. */
         if (!blacklist_tables_find(db->schema->name, table_node->name)) {
             struct ovsdb_table *table = table_node->data;
-            struct ovsdb_row *row;
-            HMAP_FOR_EACH (row, hmap_node, &table->rows) {
+            struct ovsdb_row *row, *next;
+            HMAP_FOR_EACH_SAFE (row, next, hmap_node, &table->rows) {
                 ovsdb_txn_row_delete(txn, row);
             }
         }
     }
 
-    return ovsdb_txn_commit(txn, false);
+    return ovsdb_txn_propose_commit_block(txn, false);
 }
 
 /* Create a monitor request for 'db'. The monitor request will include
@@ -611,7 +614,7 @@ process_notification(struct json *table_updates, struct ovsdb *db)
             return error;
         } else {
             /* Commit transaction. */
-            error = ovsdb_txn_commit(txn, false);
+            error = ovsdb_txn_propose_commit_block(txn, false);
         }
     }
 
@@ -870,7 +873,6 @@ replication_status(void)
             break;
         default:
             OVS_NOT_REACHED();
-            break;
         }
     } else {
         ds_put_format(&ds, "not connected to %s", sync_from);

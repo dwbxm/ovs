@@ -74,34 +74,156 @@
       </dd>
     </dl>
 
-    <h1>Logical Switch ACL Commands</h1>
+    <h1>ACL Commands</h1>
+    <p>
+      These commands operates on ACL objects for a given <var>entity</var>.
+      The <var>entity</var> can be either a logical switch or a port group.
+      The <var>entity</var> can be specified as uuid or name.  The
+      <code>--type</code> option can be used to specify the type of the
+      <var>entity</var>, in case both a logical switch and a port groups exist
+      with the same name specified for <var>entity</var>.  <code>type</code>
+      must be either <code>switch</code> or <code>port-group</code>.
+    </p>
     <dl>
-      <dt>[<code>--log</code>] [<code>--may-exist</code>] <code>acl-add</code> <var>switch</var> <var>direction</var> <var>priority</var> <var>match</var> <var>action</var></dt>
+      <dt>[<code>--type=</code>{<code>switch</code> | <code>port-group</code>}] [<code>--log</code>] [<code>--meter=</code><var>meter</var>] [<code>--severity=</code><var>severity</var>] [<code>--name=</code><var>name</var>] [<code>--may-exist</code>] <code>acl-add</code> <var>entity</var> <var>direction</var> <var>priority</var> <var>match</var> <var>verdict</var></dt>
       <dd>
-        Adds the specified ACL to <var>switch</var>.
-        <var>direction</var> must be either <code>from-lport</code> or
-        <code>to-lport</code>.  <var>priority</var> must be between
-        <code>0</code> and <code>32767</code>, inclusive.  If
-        <code>--log</code> is specified, packet logging is enabled for the
-        ACL.  A full description of the fields are in <code>ovn-nb</code>(5).
-        If <code>--may-exist</code> is specified, adding a duplicated ACL
-        succeeds but the ACL is not really created. Without <code>--may-exist</code>,
-        adding a duplicated ACL results in error.
+        <p>
+          Adds the specified ACL to <var>entity</var>.  <var>direction</var>
+          must be either <code>from-lport</code> or <code>to-lport</code>.
+          <var>priority</var> must be between <code>0</code> and
+          <code>32767</code>, inclusive.  A full description of the fields are
+          in <code>ovn-nb</code>(5).  If <code>--may-exist</code> is specified,
+          adding a duplicated ACL succeeds but the ACL is not really created.
+          Without <code>--may-exist</code>, adding a duplicated ACL results in
+          error.
+        </p>
+
+        <p>
+          The <code>--log</code> option enables packet logging for the ACL.
+          The options <code>--severity</code> and <code>--name</code> specify a
+          severity and name, respectively, for log entries (and also enable
+          logging).  The severity must be one of <code>alert</code>,
+          <code>warning</code>, <code>notice</code>, <code>info</code>, or
+          <code>debug</code>.  If a severity is not specified, the default is
+          <code>info</code>.  The <code>--meter=<var>meter</var></code> option
+          is used to rate-limit packet logging.  The <var>meter</var> argument
+          names a meter configured by <code>meter-add</code>.
+        </p>
       </dd>
 
-      <dt><code>acl-del</code> <var>switch</var> [<var>direction</var> [<var>priority</var> <var>match</var>]]</dt>
+      <dt>[<code>--type=</code>{<code>switch</code> | <code>port-group</code>}] <code>acl-del</code> <var>entity</var> [<var>direction</var> [<var>priority</var> <var>match</var>]]</dt>
       <dd>
-        Deletes ACLs from <var>switch</var>.  If only
-        <var>switch</var> is supplied, all the ACLs from the logical
+        Deletes ACLs from <var>entity</var>.  If only <var>entity</var> is
+        supplied, all the ACLs from the <var>entity</var> are deleted.  If
+        <var>direction</var> is also specified, then all the flows in that
+        direction will be deleted from the <var>entity</var>.  If all the
+        fields are given, then a single flow that matches all the fields will
+        be deleted.
+      </dd>
+
+      <dt>[<code>--type=</code>{<code>switch</code> | <code>port-group</code>}] <code>acl-list</code> <var>entity</var> </dt>
+      <dd>
+        Lists the ACLs on <var>entity</var>.
+      </dd>
+    </dl>
+
+    <h1>Logical Switch QoS Rule Commands</h1>
+    <dl>
+      <dt>[<code>--may-exist</code>] <code>qos-add</code> <var>switch</var> <var>direction</var> <var>priority</var> <var>match</var> [<code>dscp=</code><var>dscp</var>] [<code>rate=</code><var>rate</var> [<code>burst=</code><var>burst</var>]]</dt>
+      <dd>
+        <p>
+          Adds QoS marking and metering rules to <var>switch</var>.
+          <var>direction</var> must be either <code>from-lport</code> or
+          <code>to-lport</code>.  <var>priority</var> must be between
+          <code>0</code> and <code>32767</code>, inclusive.
+        </p>
+
+        <p>
+          If <code>dscp=</code><var>dscp</var> is specified, then
+          matching packets will have DSCP marking applied.
+          <var>dscp</var> must be between <code>0</code> and
+          <code>63</code>, inclusive.  If <code>rate=</code><var>rate</var>
+          is specified then matching packets will have metering applied
+          at <var>rate</var> kbps.  If metering is configured, then
+          <code>burst=</code><var>burst</var> specifies the burst rate
+          limit in kilobits.  <code>dscp</code> and/or <code>rate</code>
+          are required arguments.
+        </p>
+
+        <p>
+          If <code>--may-exist</code> is specified, adding a duplicated
+          QoS rule succeeds but the QoS rule is not really created.
+          Without <code>--may-exist</code>, adding a duplicated QoS rule
+          results in error.
+        </p>
+      </dd>
+
+      <dt><code>qos-del</code> <var>switch</var> [<var>direction</var> [<var>priority</var> <var>match</var>]]</dt>
+      <dd>
+        Deletes QoS rules from <var>switch</var>.  If only
+        <var>switch</var> is supplied, all the QoS rules from the logical
         switch are deleted.  If <var>direction</var> is also specified,
         then all the flows in that direction will be deleted from the
-        logical switch.  If all the fields are given, then a single flow
-        that matches all the fields will be deleted.
+        logical switch.  If all the fields are supplied, then a single
+        flow that matches the given fields will be deleted.
       </dd>
 
-      <dt><code>acl-list</code> <var>switch</var></dt>
+      <dt><code>qos-list</code> <var>switch</var></dt>
       <dd>
-        Lists the ACLs on <var>switch</var>.
+        Lists the QoS rules on <var>switch</var>.
+      </dd>
+    </dl>
+
+    <h1>Meter Commands</h1>
+    <dl>
+        <dt><code>meter-add</code> <var>name</var> <var>action</var> <var>rate</var> <var>unit</var> [<var>burst</var>]</dt>
+      <dd>
+        <p>
+          Adds the specified meter.  <var>name</var> must be a unique
+          name to identify this meter.  The <var>action</var> argument
+          specifies what should happen when this meter is exceeded.
+          The only supported action is <code>drop</code>.
+        </p>
+
+        <p>
+          The <var>unit</var> specifies the unit for the <var>rate</var>
+          argument; valid values are <code>kbps</code> and
+          <code>pktps</code> for kilobits per second and packets per
+          second, respectively.  The <var>burst</var> option
+          configures the maximum burst allowed for the band in kilobits
+          or packets depending on whether the <var>unit</var> chosen was
+          <code>kbps</code> or <code>pktps</code>, respectively.  If a
+          burst is not supplied, the switch is free to select some
+          reasonable value depending on its configuration.
+        </p>
+
+        <p>
+          <code>ovn-nbctl</code> only supports adding a meter with a
+          single band, but the other commands support meters with
+          multiple bands.
+        </p>
+
+        <p>
+          Names that start with "__" (two underscores) are reserved for
+          internal use by OVN, so <code>ovn-nbctl</code> does not allow
+          adding them.
+        </p>
+      </dd>
+
+      <dt><code>meter-del</code> [<var>name</var>]</dt>
+      <dd>
+        <p>
+          Deletes meters.  By default, all meters are deleted.  If
+          <var>name</var> is supplied, only the meter with that name
+          will be deleted.
+      </p>
+      </dd>
+
+      <dt><code>meter-list</code></dt>
+      <dd>
+        <p>
+          Lists all meters.
+        </p>
       </dd>
     </dl>
 
@@ -268,7 +390,49 @@
 
       <dt><code>lsp-set-type</code> <var>port</var> <var>type</var></dt>
       <dd>
-        Set the type for the logical port.  No special types have been implemented yet.
+        <p>
+          Set the type for the logical port.  The type must be one of the following:
+        </p>
+
+        <dl>
+          <dt><code>(empty string)</code></dt>
+          <dd>
+            A VM (or VIF) interface.
+          </dd>
+
+          <dt><code>router</code></dt>
+          <dd>
+            A connection to a logical router.
+          </dd>
+
+          <dt><code>localnet</code></dt>
+          <dd>
+            A connection to a locally accessible network from each ovn-controller
+            instance. A logical switch can only have a single localnet port
+            attached. This is used to model direct connectivity to an existing
+            network.
+          </dd>
+
+          <dt><code>localport</code></dt>
+          <dd>
+            A connection to a local VIF. Traffic that arrives on a localport is
+            never forwarded over a tunnel to another chassis. These ports are
+            present on every chassis and have the same address in all of them.
+            This is used to model connectivity to local services that run on
+            every hypervisor.
+          </dd>
+
+          <dt><code>l2gateway</code></dt>
+          <dd>
+            A connection to a physical network.
+          </dd>
+
+          <dt><code>vtep</code></dt>
+          <dd>
+            A port to a logical switch on a VTEP gateway.
+          </dd>
+        </dl>
+
       </dd>
 
       <dt><code>lsp-get-type</code> <var>port</var></dt>
@@ -284,6 +448,32 @@
       <dt><code>lsp-get-options</code> <var>port</var></dt>
       <dd>
         Get the type-specific options for the logical port.
+      </dd>
+
+      <dt><code>lsp-set-dhcpv4-options</code> <var>port</var>
+          <var>dhcp_options</var></dt>
+      <dd>
+        Set the DHCPv4 options for the logical port.  The
+        <var>dhcp_options</var> is a UUID referring to a set of DHCP options in
+        the <ref table="DHCP_Options" /> table.
+      </dd>
+
+      <dt><code>lsp-get-dhcpv4-optoins</code> <var>port</var></dt>
+      <dd>
+        Get the configured DHCPv4 options for the logical port.
+      </dd>
+
+      <dt><code>lsp-set-dhcpv6-options</code> <var>port</var>
+          <var>dhcp_options</var></dt>
+      <dd>
+          Set the DHCPv6 options for the logical port.  The
+          <var>dhcp_options</var> is a UUID referring to a set of DHCP options
+          in the <ref table="DHCP_Options" /> table.
+      </dd>
+
+      <dt><code>lsp-get-dhcpv6-optoins</code> <var>port</var></dt>
+      <dd>
+        Get the configured DHCPv6 options for the logical port.
       </dd>
 
     </dl>
@@ -388,6 +578,29 @@
       <dd>
         Prints the administrative state of <var>port</var>, either
         <code>enabled</code> or <code>disabled</code>.
+      </dd>
+
+      <dt><code>lrp-set-gateway-chassis</code> <var>port</var>
+          <var>chassis</var> [<var>priority</var>]</dt>
+      <dd>
+        Set gateway chassis for <var>port</var>. <var>chassis</var>
+        is the name of the chassis. This creates a gateway chassis entry
+        in Gateway_Chassis table. It won't check if chassis really exists
+        in OVN_Southbound database. Priority will be set to 0
+        if <var>priority</var> is not provided by user. <var>priority</var>
+        must be between <code>0</code> and <code>32767</code>, inclusive.
+      </dd>
+      <dt><code>lrp-del-gateway-chassis</code> <var>port</var>
+          <var>chassis</var></dt>
+      <dd>
+        Deletes gateway chassis from <var>port</var>.  It is an error if
+        gateway chassis with <var>chassis</var> for <var>port</var> does
+        not exist.
+      </dd>
+      <dt><code>lrp-get-gateway-chassis</code> <var>port</var></dt>
+      <dd>
+        Lists all the gateway chassis with priority within <var>port</var> on
+        standard output, one per line, ordered based on priority.
       </dd>
     </dl>
 
@@ -539,13 +752,15 @@
          Creates a new load balancer named <var>lb</var> with the provided
          <var>vip</var> and <var>ips</var> or adds the <var>vip</var> to
          an existing <var>lb</var>.  <var>vip</var> should be a
-         virtual IPv4 address (or an IPv4 address and a port number with
+         virtual IP address (or an IP address and a port number with
          <code>:</code> as a separator).  Examples for <var>vip</var> are
-         <code>192.168.1.4</code> and <code>192.168.1.5:8080</code>.
-         <var>ips</var> should be comma separated IPv4 endpoints (or comma
-         separated IPv4 addresses and port numbers with <code>:</code> as a
-         separator).  Examples for <var>ips</var> are <code>10.0.0.1,10.0.0.2
-         </code>or <code>20.0.0.10:8800,20.0.0.11:8800</code>.
+         <code>192.168.1.4</code>, <code>fd0f::1</code>, and
+         <code>192.168.1.5:8080</code>. <var>ips</var> should be comma
+         separated IP endpoints (or comma separated IP addresses and port
+         numbers with <code>:</code> as a separator).  <var>ips</var> must
+         be the same address family as <var>vip</var>.  Examples for
+         <var>ips</var> are <code>10.0.0.1,10.0.0.2</code>or
+         <code>[fdef::1]:8800,[fdef::2]:8800</code>.
         </p>
 
         <p>
@@ -669,73 +884,31 @@
     <h1>Database Commands</h1>
     <p>These commands query and modify the contents of <code>ovsdb</code> tables.
     They are a slight abstraction of the <code>ovsdb</code> interface and
-    as suchthey operate at a lower level than other <code>ovn-nbctl</code> commands.</p>
+    as such they operate at a lower level than other <code>ovn-nbctl</code> commands.</p>
     <p><var>Identifying Tables, Records, and Columns</var></p>
     <p>Each of these commands has a <var>table</var> parameter to identify a table
     within the database.  Many of them also take a <var>record</var> parameter
     that identifies a particular record within a table.  The <var>record</var>
-    parameter may be the UUID for a record, and many tables offer
+    parameter may be the UUID for a record, which may be abbreviated to its
+    first 4 (or more) hex digits, as long as that is unique.  Many tables offer
     additional ways to identify records.  Some commands also take
     <var>column</var> parameters that identify a particular field within the
     records in a table.</p>
-    <p>The following tables are currently defined:</p>
-    <dl>
-      <dt><code>Logical_Switch</code></dt>
-      <dd>
-        An L2 logical switch.  Records may be identified by name.
-      </dd>
 
-      <dt><code>Logical_Switch_Port</code></dt>
-      <dd>
-        A port within an L2 logical switch.  Records may be identified by name.
-      </dd>
+    <p>
+      For a list of tables and their columns, see <code>ovn-nb</code>(5) or
+      see the table listing from the <code>--help</code> option.
+    </p>
 
-      <dt><code>ACL</code></dt>
-      <dd>
-        An ACL rule for a logical switch that points to it through its <var>acls</var> column.
-      </dd>
-
-      <dt><code>Logical_Router</code></dt>
-      <dd>
-        An L3 logical router.  Records may be identified by name.
-      </dd>
-
-      <dt><code>Logical_Router_Port</code></dt>
-      <dd>
-        A port within an L3 logical router.  Records may be identified by name.
-      </dd>
-
-      <dt><code>Logical_Router_Static_Route</code></dt>
-      <dd>
-        A static route belonging to an L3 logical router.
-      </dd>
-
-      <dt><code>Address_Set</code></dt>
-      <dd>
-        An address set that can be used in ACLs.
-      </dd>
-
-      <dt><code>Load_Balancer</code></dt>
-      <dd>
-        A load balancer for a logical switch that points to it through its <var>load_balancer</var> column.
-      </dd>
-
-      <dt><code>NAT</code></dt>
-      <dd>
-        A NAT rule for a Gateway router.
-      </dd>
-
-      <dt><code>DHCP_Options</code></dt>
-      <dd>
-        DHCP options.
-      </dd>
-
-      <dt><code>NB_Global</code></dt>
-      <dd>
-        North bound global configurations.
-      </dd>
-
-    </dl>
+    <p>
+      Record names must be specified in full and with correct capitalization,
+      except that UUIDs may be abbreviated to their first 4 (or more) hex
+      digits, as long as that is unique within the table.  Names of tables and
+      columns are not case-sensitive, and <code>-</code> and <code>_</code> are
+      treated interchangeably.  Unique abbreviations of table and column names
+      are acceptable, e.g. <code>d</code> or <code>dhcp</code> is sufficient
+      to identify the <code>DHCP_Options</code> table.
+    </p>
 
     <xi:include href="lib/db-ctl-base.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
 
@@ -767,9 +940,11 @@
       Deletes the configured connection(s).
       </dd>
 
-      <dt><code>set-connection</code> <var>target</var>...</dt>
+      <dt>[<code>--inactivity-probe=</code><var>msecs</var>] <code>set-connection</code> <var>target</var>...</dt>
       <dd>
-      Sets the configured manager target or targets.
+        Sets the configured manager target or targets.  Use
+        <code>--inactivity-probe=</code><var>msecs</var> to override the default
+        idle connection inactivity probe time.  Use 0 to disable inactivity probes.
       </dd>
     </dl>
 
@@ -785,11 +960,50 @@
       Deletes the current SSL configuration.
       </dd>
 
-      <dt>[<code>--bootstrap</code>] <code>set-ssl</code> <var>private-key</var> <var>certificate</var> <var>ca-cert</var></dt>
+      <dt>[<code>--bootstrap</code>] <code>set-ssl</code>
+         <var>private-key</var> <var>certificate</var> <var>ca-cert</var>
+         [<var>ssl-protocol-list</var> [<var>ssl-cipher-list</var>]]</dt>
       <dd>
       Sets the SSL configuration.
       </dd>
     </dl>
+
+    <h1>Daemon Mode</h1>
+
+    <p>
+      If <code>ovn-nbctl</code> is invoked with the <code>--detach</code>
+      option (see <code>Daemon Options</code>, below), it runs in the
+      background as a daemon and accepts commands from <code>ovs-appctl</code>
+      (or another JSON-RPC client) indefinitely.  The currently supported
+      commands are described below.
+    </p>
+
+    <p>
+
+    </p>
+
+    <dl>
+      <dt>
+        <code>run</code> [<var>options</var>] <var>command</var>
+        [<var>arg</var>...] [<code>--</code> [<var>options</var>]
+        <var>command</var> [<var>arg</var>...] ...]
+      </dt>
+      <dd>
+        Instructs the daemon process to run one or more <code>ovn-nbctl</code>
+        commands described above and reply with the results of running these
+        commands. Accepts the <code>--no-wait</code>, <code>--wait</code>,
+        <code>--timeout</code>, <code>--dry-run</code>, <code>--oneline</code>,
+        and the options described under <code>Table Formatting Options</code>
+        in addition to the the command-specific options.
+      </dd>
+
+      <dt><code>exit</code></dt>
+      <dd>Causes <code>ovn-nbctl</code> to gracefully terminate.</dd>
+    </dl>
+
+    <p>
+      Daemon mode is considered experimental.
+    </p>
 
     <h1>Options</h1>
 
@@ -839,14 +1053,38 @@
     <dd>
       The OVSDB database remote to contact.  If the <env>OVN_NB_DB</env>
       environment variable is set, its value is used as the default.
-      Otherwise, the default is <code>unix:@RUNDIR@/db.sock</code>, but this
+      Otherwise, the default is <code>unix:@RUNDIR@/ovnnb_db.sock</code>, but this
       default is unlikely to be useful outside of single-machine OVN test
       environments.
     </dd>
+
+    <dt><code>--leader-only</code></dt>
+    <dt><code>--no-leader-only</code></dt>
+    <dd>
+      By default, or with <code>--leader-only</code>, when the database server
+      is a clustered database, <code>ovn-nbctl</code> will avoid servers other
+      than the cluster leader.  This ensures that any data that
+      <code>ovn-nbctl</code> reads and reports is up-to-date.  With
+      <code>--no-leader-only</code>, <code>ovn-nbctl</code> will use any server
+      in the cluster, which means that for read-only transactions it can report
+      and act on stale data (transactions that modify the database are always
+      serialized even with <code>--no-leader-only</code>).  Refer to
+      <code>Understanding Cluster Consistency</code> in <code>ovsdb</code>(7)
+      for more information.
+    </dd>
     </dl>
+
+    <h2>Daemon Options</h2>
+    <xi:include href="lib/daemon.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
 
     <h1>Logging options</h1>
     <xi:include href="lib/vlog.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+
+    <h1>Table Formatting Options</h1>
+    These options control the format of output from the <code>list</code> and
+    <code>find</code> commands.
+    <xi:include href="lib/table.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+
     <h2>PKI Options</h2>
     <p>
       PKI configuration is required to use SSL for the connection to the

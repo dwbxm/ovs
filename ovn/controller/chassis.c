@@ -22,6 +22,7 @@
 #include "lib/vswitch-idl.h"
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/vlog.h"
+#include "ovn/lib/chassis-index.h"
 #include "ovn/lib/ovn-sb-idl.h"
 #include "ovn-controller.h"
 #include "lib/util.h"
@@ -66,13 +67,22 @@ get_bridge_mappings(const struct smap *ext_ids)
     return smap_get_def(ext_ids, "ovn-bridge-mappings", "");
 }
 
+static const char *
+get_cms_options(const struct smap *ext_ids)
+{
+    return smap_get_def(ext_ids, "ovn-cms-options", "");
+}
+
 /* Returns this chassis's Chassis record, if it is available and is currently
  * amenable to a transaction. */
 const struct sbrec_chassis *
-chassis_run(struct controller_ctx *ctx, const char *chassis_id,
+chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
+            struct ovsdb_idl_index *sbrec_chassis_by_name,
+            const struct ovsrec_open_vswitch_table *ovs_table,
+            const char *chassis_id,
             const struct ovsrec_bridge *br_int)
 {
-    if (!ctx->ovnsb_idl_txn) {
+    if (!ovnsb_idl_txn) {
         return NULL;
     }
 
@@ -80,7 +90,7 @@ chassis_run(struct controller_ctx *ctx, const char *chassis_id,
     const char *encap_type, *encap_ip;
     static bool inited = false;
 
-    cfg = ovsrec_open_vswitch_first(ctx->ovs_idl);
+    cfg = ovsrec_open_vswitch_table_first(ovs_table);
     if (!cfg) {
         VLOG_INFO("No Open_vSwitch row defined.");
         return NULL;
@@ -119,6 +129,7 @@ chassis_run(struct controller_ctx *ctx, const char *chassis_id,
     const char *bridge_mappings = get_bridge_mappings(&cfg->external_ids);
     const char *datapath_type =
         br_int && br_int->datapath_type ? br_int->datapath_type : "";
+    const char *cms_options = get_cms_options(&cfg->external_ids);
 
     struct ds iface_types = DS_EMPTY_INITIALIZER;
     ds_put_cstr(&iface_types, "");
@@ -129,7 +140,7 @@ chassis_run(struct controller_ctx *ctx, const char *chassis_id,
     const char *iface_types_str = ds_cstr(&iface_types);
 
     const struct sbrec_chassis *chassis_rec
-        = get_chassis(ctx->ovnsb_idl, chassis_id);
+        = chassis_lookup_by_name(sbrec_chassis_by_name, chassis_id);
     const char *encap_csum = smap_get_def(&cfg->external_ids,
                                           "ovn-encap-csum", "true");
     if (chassis_rec) {
@@ -144,16 +155,20 @@ chassis_run(struct controller_ctx *ctx, const char *chassis_id,
             = smap_get_def(&chassis_rec->external_ids, "datapath-type", "");
         const char *chassis_iface_types
             = smap_get_def(&chassis_rec->external_ids, "iface-types", "");
+        const char *chassis_cms_options
+            = get_cms_options(&chassis_rec->external_ids);
 
         /* If any of the external-ids should change, update them. */
         if (strcmp(bridge_mappings, chassis_bridge_mappings) ||
             strcmp(datapath_type, chassis_datapath_type) ||
-            strcmp(iface_types_str, chassis_iface_types)) {
+            strcmp(iface_types_str, chassis_iface_types) ||
+            strcmp(cms_options, chassis_cms_options)) {
             struct smap new_ids;
             smap_clone(&new_ids, &chassis_rec->external_ids);
             smap_replace(&new_ids, "ovn-bridge-mappings", bridge_mappings);
             smap_replace(&new_ids, "datapath-type", datapath_type);
             smap_replace(&new_ids, "iface-types", iface_types_str);
+            smap_replace(&new_ids, "ovn-cms-options", cms_options);
             sbrec_chassis_verify_external_ids(chassis_rec);
             sbrec_chassis_set_external_ids(chassis_rec, &new_ids);
             smap_destroy(&new_ids);
@@ -194,7 +209,7 @@ chassis_run(struct controller_ctx *ctx, const char *chassis_id,
         }
     }
 
-    ovsdb_idl_txn_add_comment(ctx->ovnsb_idl_txn,
+    ovsdb_idl_txn_add_comment(ovnsb_idl_txn,
                               "ovn-controller: registering chassis '%s'",
                               chassis_id);
 
@@ -203,7 +218,7 @@ chassis_run(struct controller_ctx *ctx, const char *chassis_id,
         smap_add(&ext_ids, "ovn-bridge-mappings", bridge_mappings);
         smap_add(&ext_ids, "datapath-type", datapath_type);
         smap_add(&ext_ids, "iface-types", iface_types_str);
-        chassis_rec = sbrec_chassis_insert(ctx->ovnsb_idl_txn);
+        chassis_rec = sbrec_chassis_insert(ovnsb_idl_txn);
         sbrec_chassis_set_name(chassis_rec, chassis_id);
         sbrec_chassis_set_hostname(chassis_rec, hostname);
         sbrec_chassis_set_external_ids(chassis_rec, &ext_ids);
@@ -217,11 +232,12 @@ chassis_run(struct controller_ctx *ctx, const char *chassis_id,
     for (int i = 0; i < n_encaps; i++) {
         const char *type = pop_tunnel_name(&req_tunnels);
 
-        encaps[i] = sbrec_encap_insert(ctx->ovnsb_idl_txn);
+        encaps[i] = sbrec_encap_insert(ovnsb_idl_txn);
 
         sbrec_encap_set_type(encaps[i], type);
         sbrec_encap_set_ip(encaps[i], encap_ip);
         sbrec_encap_set_options(encaps[i], &options);
+        sbrec_encap_set_chassis_name(encaps[i], chassis_id);
     }
     sbrec_chassis_set_encaps(chassis_rec, encaps, n_encaps);
     free(encaps);
@@ -233,14 +249,14 @@ chassis_run(struct controller_ctx *ctx, const char *chassis_id,
 /* Returns true if the database is all cleaned up, false if more work is
  * required. */
 bool
-chassis_cleanup(struct controller_ctx *ctx,
+chassis_cleanup(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 const struct sbrec_chassis *chassis_rec)
 {
     if (!chassis_rec) {
         return true;
     }
-    if (ctx->ovnsb_idl_txn) {
-        ovsdb_idl_txn_add_comment(ctx->ovnsb_idl_txn,
+    if (ovnsb_idl_txn) {
+        ovsdb_idl_txn_add_comment(ovnsb_idl_txn,
                                   "ovn-controller: unregistering chassis '%s'",
                                   chassis_rec->name);
         sbrec_chassis_delete(chassis_rec);

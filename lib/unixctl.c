@@ -24,7 +24,7 @@
 #include "openvswitch/json.h"
 #include "jsonrpc.h"
 #include "openvswitch/list.h"
-#include "poll-loop.h"
+#include "openvswitch/poll-loop.h"
 #include "openvswitch/shash.h"
 #include "stream.h"
 #include "stream-provider.h"
@@ -228,11 +228,7 @@ unixctl_server_create(const char *path, struct unixctl_server **serverp)
 
     if (path) {
         char *abs_path;
-#ifndef _WIN32
         abs_path = abs_file_name(ovs_rundir(), path);
-#else
-        abs_path = xstrdup(path);
-#endif
         punix_path = xasprintf("punix:%s", abs_path);
         free(abs_path);
     } else {
@@ -287,7 +283,9 @@ process_command(struct unixctl_conn *conn, struct jsonrpc_msg *request)
     params = json_array(request->params);
     command = shash_find_data(&commands, request->method);
     if (!command) {
-        error = xasprintf("\"%s\" is not a valid command", request->method);
+        error = xasprintf("\"%s\" is not a valid command (use "
+                          "\"list-commands\" to see a list of valid commands)",
+                          request->method);
     } else if (params->n < command->min_args) {
         error = xasprintf("\"%s\" command requires at least %d arguments",
                           request->method, command->min_args);
@@ -371,14 +369,11 @@ kill_connection(struct unixctl_conn *conn)
 void
 unixctl_server_run(struct unixctl_server *server)
 {
-    struct unixctl_conn *conn, *next;
-    int i;
-
     if (!server) {
         return;
     }
 
-    for (i = 0; i < 10; i++) {
+    for (int i = 0; i < 10; i++) {
         struct stream *stream;
         int error;
 
@@ -396,6 +391,7 @@ unixctl_server_run(struct unixctl_server *server)
         }
     }
 
+    struct unixctl_conn *conn, *next;
     LIST_FOR_EACH_SAFE (conn, next, node, &server->conns) {
         int error = run_connection(conn);
         if (error && error != EAGAIN) {
@@ -451,16 +447,11 @@ unixctl_server_destroy(struct unixctl_server *server)
 int
 unixctl_client_create(const char *path, struct jsonrpc **client)
 {
-    char *abs_path, *unix_path;
     struct stream *stream;
     int error;
 
-#ifdef _WIN32
-    abs_path = xstrdup(path);
-#else
-    abs_path = abs_file_name(ovs_rundir(), path);
-#endif
-    unix_path = xasprintf("unix:%s", abs_path);
+    char *abs_path = abs_file_name(ovs_rundir(), path);
+    char *unix_path = xasprintf("unix:%s", abs_path);
 
     *client = NULL;
 

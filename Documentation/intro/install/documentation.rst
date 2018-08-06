@@ -58,7 +58,7 @@ wish to install using ``pip``::
     $ source .venv/bin/activate
     $ pip install -r Documentation/requirements.txt
 
-__ http://www.sphinx-doc.org/install.html
+__ http://www.sphinx-doc.org/en/master/usage/installation.html
 
 Configuring
 -----------
@@ -74,16 +74,16 @@ Building
 Once Sphinx installed, the documentation can be built using the provided
 Makefile targets::
 
-    $ make htmldocs
+    $ make docs-check
 
 .. important::
 
-   The ``htmldocs`` target will fail if there are any syntax errors. However,
-   it won't catch more succint issues such as style or grammar issues. As a
-   result, you should always inspect changes visually to ensure the result is
-   as intended.
+   The ``docs-check`` target will fail if there are any syntax errors.
+   However, it won't catch more succint issues such as style or grammar issues.
+   As a result, you should always inspect changes visually to ensure the result
+   is as intended.
 
 Once built, documentation is available in the ``/Documentation/_build`` folder.
 Open the root ``index.html`` to browse the documentation.
 
-__ http://www.sphinx-doc.org/config.html
+__ http://www.sphinx-doc.org/en/master/config.html

@@ -6,17 +6,6 @@
 #include <net/net_namespace.h>
 #include_next <net/genetlink.h>
 
-/*
- * 15e473046cb6e5d18a4d0057e61d76315230382b renames pid to portid
- * the affected structures are
- * netlink_skb_parms::pid -> portid
- * genl_info::snd_pid -> snd_portid
- */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,7,0)
-#define snd_portid snd_pid
-#define portid pid
-#endif
-
 #ifndef HAVE_GENL_NOTIFY_TAKES_FAMILY
 struct rpl_genl_family {
 	struct genl_family	compat_family;
@@ -125,15 +114,23 @@ static inline int rpl_genl_has_listeners(struct genl_family *family,
 
 #endif /* HAVE_GENL_HAS_LISTENERS */
 
-#ifndef HAVE_GENLMSG_PARSE
-static inline int genlmsg_parse(const struct nlmsghdr *nlh,
-				const struct genl_family *family,
-				struct nlattr *tb[], int maxtype,
-				const struct nla_policy *policy)
+#ifndef HAVE_NETLINK_EXT_ACK
+struct netlink_ext_ack;
+
+static inline int rpl_genlmsg_parse(const struct nlmsghdr *nlh,
+				    const struct genl_family *family,
+				    struct nlattr *tb[], int maxtype,
+				    const struct nla_policy *policy,
+				    struct netlink_ext_ack *extack)
 {
+#ifdef HAVE_GENLMSG_PARSE
+	return genlmsg_parse(nlh, family, tb, maxtype, policy);
+#else
 	return nlmsg_parse(nlh, family->hdrsize + GENL_HDRLEN, tb, maxtype,
 			   policy);
+#endif
 }
+#define genlmsg_parse rpl_genlmsg_parse
 #endif
 
 #endif /* genetlink.h */

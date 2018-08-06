@@ -19,6 +19,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +29,6 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
-#include <sys/types.h>
 #endif
 
 #include "cmap.h"
@@ -45,15 +45,20 @@
 #include "odp-netlink.h"
 #include "openflow/openflow.h"
 #include "packets.h"
-#include "poll-loop.h"
+#include "openvswitch/ofp-print.h"
+#include "openvswitch/poll-loop.h"
 #include "seq.h"
 #include "openvswitch/shash.h"
 #include "smap.h"
+#include "socket-util.h"
 #include "sset.h"
 #include "svec.h"
 #include "openvswitch/vlog.h"
 #include "flow.h"
 #include "util.h"
+#ifdef __linux__
+#include "tc.h"
+#endif
 
 VLOG_DEFINE_THIS_MODULE(netdev);
 
@@ -91,6 +96,8 @@ struct netdev_registered_class {
      * instance of the class. */
     struct ovs_refcount refcnt;
 };
+
+static bool netdev_flow_api_enabled = false;
 
 /* This is set pretty low because we probably won't learn anything from the
  * additional log messages. */
@@ -288,6 +295,21 @@ netdev_enumerate_types(struct sset *types)
     }
 }
 
+static const char *
+netdev_vport_type_from_name(const char *name)
+{
+    struct netdev_registered_class *rc;
+    const char *type;
+    CMAP_FOR_EACH (rc, cmap_node, &netdev_classes) {
+        const char *dpif_port = netdev_vport_class_get_dpif_port(rc->class);
+        if (dpif_port && !strncmp(name, dpif_port, strlen(dpif_port))) {
+            type = rc->class->type;
+            return type;
+        }
+    }
+    return NULL;
+}
+
 /* Check that the network device name is not the same as any of the registered
  * vport providers' dpif_port name (dpif_port is NULL if the vport provider
  * does not define it) or the datapath internal port name (e.g. ovs-system).
@@ -341,7 +363,7 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
     OVS_EXCLUDED(netdev_mutex)
 {
     struct netdev *netdev;
-    int error;
+    int error = 0;
 
     if (!name[0]) {
         /* Reject empty names.  This saves the providers having to do this.  At
@@ -355,6 +377,29 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
 
     ovs_mutex_lock(&netdev_mutex);
     netdev = shash_find_data(&netdev_shash, name);
+
+    if (netdev &&
+        type && type[0] && strcmp(type, netdev->netdev_class->type)) {
+
+        if (netdev->auto_classified) {
+            /* If this device was first created without a classification type,
+             * for example due to routing or tunneling code, and they keep a
+             * reference, a "classified" call to open will fail. In this case
+             * we remove the classless device, and re-add it below. We remove
+             * the netdev from the shash, and change the sequence, so owners of
+             * the old classless device can release/cleanup. */
+            if (netdev->node) {
+                shash_delete(&netdev_shash, netdev->node);
+                netdev->node = NULL;
+                netdev_change_seq_changed(netdev);
+            }
+
+            netdev = NULL;
+        } else {
+            error = EEXIST;
+        }
+    }
+
     if (!netdev) {
         struct netdev_registered_class *rc;
 
@@ -364,6 +409,7 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
             if (netdev) {
                 memset(netdev, 0, sizeof *netdev);
                 netdev->netdev_class = rc->class;
+                netdev->auto_classified = type && type[0] ? false : true;
                 netdev->name = xstrdup(name);
                 netdev->change_seq = 1;
                 netdev->reconfigure_seq = seq_create();
@@ -396,8 +442,6 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
                       name, type);
             error = EAFNOSUPPORT;
         }
-    } else {
-        error = 0;
     }
 
     if (!error) {
@@ -447,7 +491,11 @@ netdev_set_config(struct netdev *netdev, const struct smap *args, char **errp)
                           "%s: could not set configuration (%s)",
                           netdev_get_name(netdev), ovs_strerror(error));
             if (verbose_error) {
-                *errp = verbose_error;
+                if (errp) {
+                    *errp = verbose_error;
+                } else {
+                    free(verbose_error);
+                }
             }
         }
         return error;
@@ -648,11 +696,12 @@ netdev_rxq_close(struct netdev_rxq *rx)
  * Returns EAGAIN immediately if no packet is ready to be received or another
  * positive errno value if an error was encountered. */
 int
-netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet_batch *batch)
+netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet_batch *batch,
+                int *qfill)
 {
     int retval;
 
-    retval = rx->netdev->netdev_class->rxq_recv(rx, batch);
+    retval = rx->netdev->netdev_class->rxq_recv(rx, batch, qfill);
     if (!retval) {
         COVERAGE_INC(netdev_received);
     } else {
@@ -705,6 +754,14 @@ netdev_set_tx_multiq(struct netdev *netdev, unsigned int n_txq)
     return error;
 }
 
+enum netdev_pt_mode
+netdev_get_pt_mode(const struct netdev *netdev)
+{
+    return (netdev->netdev_class->get_pt_mode
+            ? netdev->netdev_class->get_pt_mode(netdev)
+            : NETDEV_PT_LEGACY_L2);
+}
+
 /* Sends 'batch' on 'netdev'.  Returns 0 if successful (for every packet),
  * otherwise a positive errno value.  Returns EAGAIN without blocking if
  * at least one the packets cannot be queued immediately.  Returns EMSGSIZE
@@ -717,9 +774,8 @@ netdev_set_tx_multiq(struct netdev *netdev, unsigned int n_txq)
  * If the function returns a non-zero value, some of the packets might have
  * been sent anyway.
  *
- * If 'may_steal' is false, the caller retains ownership of all the packets.
- * If 'may_steal' is true, the caller transfers ownership of all the packets
- * to the network device, regardless of success.
+ * The caller transfers ownership of all the packets to the network device,
+ * regardless of success.
  *
  * If 'concurrent_txq' is true, the caller may perform concurrent calls
  * to netdev_send() with the same 'qid'. The netdev provider is responsible
@@ -730,21 +786,15 @@ netdev_set_tx_multiq(struct netdev *netdev, unsigned int n_txq)
  * transmission queues, so that the caller does not ordinarily have to
  * do additional queuing of packets.  'qid' specifies the queue to use
  * and can be ignored if the implementation does not support multiple
- * queues.
- *
- * Some network devices may not implement support for this function.  In such
- * cases this function will always return EOPNOTSUPP. */
+ * queues. */
 int
 netdev_send(struct netdev *netdev, int qid, struct dp_packet_batch *batch,
-            bool may_steal, bool concurrent_txq)
+            bool concurrent_txq)
 {
-    int error = netdev->netdev_class->send(netdev, qid, batch, may_steal,
+    int error = netdev->netdev_class->send(netdev, qid, batch,
                                            concurrent_txq);
     if (!error) {
         COVERAGE_INC(netdev_sent);
-        if (!may_steal) {
-            dp_packet_batch_reset_cutlen(batch);
-        }
     }
     return error;
 }
@@ -807,9 +857,9 @@ netdev_push_header(const struct netdev *netdev,
                    const struct ovs_action_push_tnl *data)
 {
     struct dp_packet *packet;
-    DP_PACKET_BATCH_FOR_EACH (packet, batch) {
-        netdev->netdev_class->push_header(packet, data);
-        pkt_metadata_init(&packet->md, u32_to_odp(data->out_port));
+    DP_PACKET_BATCH_FOR_EACH (i, packet, batch) {
+        netdev->netdev_class->push_header(netdev, packet, data);
+        pkt_metadata_init(&packet->md, data->out_port);
     }
 
     return 0;
@@ -846,7 +896,13 @@ netdev_set_etheraddr(struct netdev *netdev, const struct eth_addr mac)
 int
 netdev_get_etheraddr(const struct netdev *netdev, struct eth_addr *mac)
 {
-    return netdev->netdev_class->get_etheraddr(netdev, mac);
+    int error;
+
+    error = netdev->netdev_class->get_etheraddr(netdev, mac);
+    if (error) {
+        memset(mac, 0, sizeof *mac);
+    }
+    return error;
 }
 
 /* Returns the name of the network device that 'netdev' represents,
@@ -896,7 +952,7 @@ netdev_set_mtu(struct netdev *netdev, int mtu)
 
     error = class->set_mtu ? class->set_mtu(netdev, mtu) : EOPNOTSUPP;
     if (error && error != EOPNOTSUPP) {
-        VLOG_DBG_RL(&rl, "failed to set MTU for network device %s: %s",
+        VLOG_WARN_RL(&rl, "failed to set MTU for network device %s: %s",
                      netdev_get_name(netdev), ovs_strerror(error));
     }
 
@@ -1042,6 +1098,40 @@ netdev_set_advertisements(struct netdev *netdev,
             : EOPNOTSUPP);
 }
 
+static const char *
+netdev_feature_to_name(uint32_t bit)
+{
+    enum netdev_features f = bit;
+
+    switch (f) {
+    case NETDEV_F_10MB_HD:    return "10MB-HD";
+    case NETDEV_F_10MB_FD:    return "10MB-FD";
+    case NETDEV_F_100MB_HD:   return "100MB-HD";
+    case NETDEV_F_100MB_FD:   return "100MB-FD";
+    case NETDEV_F_1GB_HD:     return "1GB-HD";
+    case NETDEV_F_1GB_FD:     return "1GB-FD";
+    case NETDEV_F_10GB_FD:    return "10GB-FD";
+    case NETDEV_F_40GB_FD:    return "40GB-FD";
+    case NETDEV_F_100GB_FD:   return "100GB-FD";
+    case NETDEV_F_1TB_FD:     return "1TB-FD";
+    case NETDEV_F_OTHER:      return "OTHER";
+    case NETDEV_F_COPPER:     return "COPPER";
+    case NETDEV_F_FIBER:      return "FIBER";
+    case NETDEV_F_AUTONEG:    return "AUTO_NEG";
+    case NETDEV_F_PAUSE:      return "AUTO_PAUSE";
+    case NETDEV_F_PAUSE_ASYM: return "AUTO_PAUSE_ASYM";
+    }
+
+    return NULL;
+}
+
+void
+netdev_features_format(struct ds *s, enum netdev_features features)
+{
+    ofp_print_bit_names(s, features, netdev_feature_to_name, ' ');
+    ds_put_char(s, '\n');
+}
+
 /* Assigns 'addr' as 'netdev''s IPv4 address and 'mask' as its netmask.  If
  * 'addr' is INADDR_ANY, 'netdev''s IPv4 address is cleared.  Returns a
  * positive errno value. */
@@ -1053,39 +1143,74 @@ netdev_set_in4(struct netdev *netdev, struct in_addr addr, struct in_addr mask)
             : EOPNOTSUPP);
 }
 
-/* Obtains ad IPv4 address from device name and save the address in
- * in4.  Returns 0 if successful, otherwise a positive errno value.
- */
+static int
+netdev_get_addresses_by_name(const char *device_name,
+                             struct in6_addr **addrsp, int *n_addrsp)
+{
+    struct netdev *netdev;
+    int error = netdev_open(device_name, NULL, &netdev);
+    if (error) {
+        *addrsp = NULL;
+        *n_addrsp = 0;
+        return error;
+    }
+
+    struct in6_addr *masks;
+    error = netdev_get_addr_list(netdev, addrsp, &masks, n_addrsp);
+    netdev_close(netdev);
+    free(masks);
+    return error;
+}
+
+/* Obtains an IPv4 address from 'device_name' and save the address in '*in4'.
+ * Returns 0 if successful, otherwise a positive errno value. */
 int
 netdev_get_in4_by_name(const char *device_name, struct in_addr *in4)
 {
-    struct in6_addr *mask, *addr6;
-    int err, n_in6, i;
-    struct netdev *dev;
+    struct in6_addr *addrs;
+    int n;
+    int error = netdev_get_addresses_by_name(device_name, &addrs, &n);
 
-    err = netdev_open(device_name, NULL, &dev);
-    if (err) {
-        return err;
-    }
-
-    err = netdev_get_addr_list(dev, &addr6, &mask, &n_in6);
-    if (err) {
-        goto out;
-    }
-
-    for (i = 0; i < n_in6; i++) {
-        if (IN6_IS_ADDR_V4MAPPED(&addr6[i])) {
-            in4->s_addr = in6_addr_get_mapped_ipv4(&addr6[i]);
-            goto out;
+    in4->s_addr = 0;
+    if (!error) {
+        error = ENOENT;
+        for (int i = 0; i < n; i++) {
+            if (IN6_IS_ADDR_V4MAPPED(&addrs[i])) {
+                in4->s_addr = in6_addr_get_mapped_ipv4(&addrs[i]);
+                error = 0;
+                break;
+            }
         }
     }
-    err = -ENOENT;
-out:
-    free(addr6);
-    free(mask);
-    netdev_close(dev);
-    return err;
+    free(addrs);
 
+    return error;
+}
+
+/* Obtains an IPv4 or IPv6 address from 'device_name' and save the address in
+ * '*in6', representing IPv4 addresses as v6-mapped.  Returns 0 if successful,
+ * otherwise a positive errno value. */
+int
+netdev_get_ip_by_name(const char *device_name, struct in6_addr *in6)
+{
+    struct in6_addr *addrs;
+    int n;
+    int error = netdev_get_addresses_by_name(device_name, &addrs, &n);
+
+    *in6 = in6addr_any;
+    if (!error) {
+        error = ENOENT;
+        for (int i = 0; i < n; i++) {
+            if (!in6_is_lla(&addrs[i])) {
+                *in6 = addrs[i];
+                error = 0;
+                break;
+            }
+        }
+    }
+    free(addrs);
+
+    return error;
 }
 
 /* Adds 'router' as a default IP gateway for the TCP/IP stack that corresponds
@@ -1367,6 +1492,21 @@ netdev_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
     }
     return error;
 }
+
+/* Retrieves current device custom stats for 'netdev'. */
+int
+netdev_get_custom_stats(const struct netdev *netdev,
+                        struct netdev_custom_stats *custom_stats)
+{
+    int error;
+    memset(custom_stats, 0, sizeof *custom_stats);
+    error = (netdev->netdev_class->get_custom_stats
+             ? netdev->netdev_class->get_custom_stats(netdev, custom_stats)
+             : EOPNOTSUPP);
+
+    return error;
+}
+
 
 /* Attempts to set input rate limiting (policing) policy, such that up to
  * 'kbits_rate' kbps of traffic is accepted, with a maximum accumulative burst
@@ -1811,9 +1951,14 @@ netdev_get_vports(size_t *size)
 const char *
 netdev_get_type_from_name(const char *name)
 {
-    struct netdev *dev = netdev_from_name(name);
-    const char *type = dev ? netdev_get_type(dev) : NULL;
-    netdev_close(dev);
+    struct netdev *dev;
+    const char *type;
+    type = netdev_vport_type_from_name(name);
+    if (type == NULL) {
+        dev = netdev_from_name(name);
+        type = dev ? netdev_get_type(dev) : NULL;
+        netdev_close(dev);
+    }
     return type;
 }
 
@@ -1907,7 +2052,7 @@ netdev_get_addrs(const char dev[], struct in6_addr **paddr,
     }
 
     for (ifa = if_addr_list; ifa; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr != NULL) {
+        if (ifa->ifa_addr && ifa->ifa_name && ifa->ifa_netmask) {
             int family;
 
             family = ifa->ifa_addr->sa_family;
@@ -1926,28 +2071,13 @@ netdev_get_addrs(const char dev[], struct in6_addr **paddr,
     addr_array = xzalloc(sizeof *addr_array * cnt);
     mask_array = xzalloc(sizeof *mask_array * cnt);
     for (ifa = if_addr_list; ifa; ifa = ifa->ifa_next) {
-        int family;
-
-        if (strncmp(ifa->ifa_name, dev, IFNAMSIZ) || ifa->ifa_addr == NULL) {
-            continue;
-        }
-
-        family = ifa->ifa_addr->sa_family;
-        if (family == AF_INET) {
-            const struct sockaddr_in *sin;
-
-            sin = ALIGNED_CAST(const struct sockaddr_in *, ifa->ifa_addr);
-            in6_addr_set_mapped_ipv4(&addr_array[i], sin->sin_addr.s_addr);
-            sin = ALIGNED_CAST(const struct sockaddr_in *, ifa->ifa_netmask);
-            in6_addr_set_mapped_ipv4(&mask_array[i], sin->sin_addr.s_addr);
-            i++;
-        } else if (family == AF_INET6) {
-            const struct sockaddr_in6 *sin6;
-
-            sin6 = ALIGNED_CAST(const struct sockaddr_in6 *, ifa->ifa_addr);
-            memcpy(&addr_array[i], &sin6->sin6_addr, sizeof *addr_array);
-            sin6 = ALIGNED_CAST(const struct sockaddr_in6 *, ifa->ifa_netmask);
-            memcpy(&mask_array[i], &sin6->sin6_addr, sizeof *mask_array);
+        if (ifa->ifa_name
+            && ifa->ifa_addr
+            && ifa->ifa_netmask
+            && !strncmp(ifa->ifa_name, dev, IFNAMSIZ)
+            && sa_is_ip(ifa->ifa_addr)) {
+            addr_array[i] = sa_get_address(ifa->ifa_addr);
+            mask_array[i] = sa_get_address(ifa->ifa_netmask);
             i++;
         }
     }
@@ -1998,3 +2128,385 @@ netdev_reconfigure(struct netdev *netdev)
             ? class->reconfigure(netdev)
             : EOPNOTSUPP);
 }
+
+int
+netdev_flow_flush(struct netdev *netdev)
+{
+    const struct netdev_class *class = netdev->netdev_class;
+
+    return (class->flow_flush
+            ? class->flow_flush(netdev)
+            : EOPNOTSUPP);
+}
+
+int
+netdev_flow_dump_create(struct netdev *netdev, struct netdev_flow_dump **dump)
+{
+    const struct netdev_class *class = netdev->netdev_class;
+
+    return (class->flow_dump_create
+            ? class->flow_dump_create(netdev, dump)
+            : EOPNOTSUPP);
+}
+
+int
+netdev_flow_dump_destroy(struct netdev_flow_dump *dump)
+{
+    const struct netdev_class *class = dump->netdev->netdev_class;
+
+    return (class->flow_dump_destroy
+            ? class->flow_dump_destroy(dump)
+            : EOPNOTSUPP);
+}
+
+bool
+netdev_flow_dump_next(struct netdev_flow_dump *dump, struct match *match,
+                      struct nlattr **actions, struct dpif_flow_stats *stats,
+                      struct dpif_flow_attrs *attrs, ovs_u128 *ufid,
+                      struct ofpbuf *rbuffer, struct ofpbuf *wbuffer)
+{
+    const struct netdev_class *class = dump->netdev->netdev_class;
+
+    return (class->flow_dump_next
+            ? class->flow_dump_next(dump, match, actions, stats, attrs,
+                                    ufid, rbuffer, wbuffer)
+            : false);
+}
+
+int
+netdev_flow_put(struct netdev *netdev, struct match *match,
+                struct nlattr *actions, size_t act_len,
+                const ovs_u128 *ufid, struct offload_info *info,
+                struct dpif_flow_stats *stats)
+{
+    const struct netdev_class *class = netdev->netdev_class;
+
+    return (class->flow_put
+            ? class->flow_put(netdev, match, actions, act_len, ufid,
+                              info, stats)
+            : EOPNOTSUPP);
+}
+
+int
+netdev_flow_get(struct netdev *netdev, struct match *match,
+                struct nlattr **actions, const ovs_u128 *ufid,
+                struct dpif_flow_stats *stats,
+                struct dpif_flow_attrs *attrs, struct ofpbuf *buf)
+{
+    const struct netdev_class *class = netdev->netdev_class;
+
+    return (class->flow_get
+            ? class->flow_get(netdev, match, actions, ufid, stats, attrs, buf)
+            : EOPNOTSUPP);
+}
+
+int
+netdev_flow_del(struct netdev *netdev, const ovs_u128 *ufid,
+                struct dpif_flow_stats *stats)
+{
+    const struct netdev_class *class = netdev->netdev_class;
+
+    return (class->flow_del
+            ? class->flow_del(netdev, ufid, stats)
+            : EOPNOTSUPP);
+}
+
+int
+netdev_init_flow_api(struct netdev *netdev)
+{
+    const struct netdev_class *class = netdev->netdev_class;
+
+    if (!netdev_is_flow_api_enabled()) {
+        return EOPNOTSUPP;
+    }
+
+    return (class->init_flow_api
+            ? class->init_flow_api(netdev)
+            : EOPNOTSUPP);
+}
+
+uint32_t
+netdev_get_block_id(struct netdev *netdev)
+{
+    const struct netdev_class *class = netdev->netdev_class;
+
+    return (class->get_block_id
+            ? class->get_block_id(netdev)
+            : 0);
+}
+
+bool
+netdev_is_flow_api_enabled(void)
+{
+    return netdev_flow_api_enabled;
+}
+
+/* Protects below port hashmaps. */
+static struct ovs_mutex netdev_hmap_mutex = OVS_MUTEX_INITIALIZER;
+
+static struct hmap port_to_netdev OVS_GUARDED_BY(netdev_hmap_mutex)
+    = HMAP_INITIALIZER(&port_to_netdev);
+static struct hmap ifindex_to_port OVS_GUARDED_BY(netdev_hmap_mutex)
+    = HMAP_INITIALIZER(&ifindex_to_port);
+
+struct port_to_netdev_data {
+    struct hmap_node portno_node; /* By (dpif_class, dpif_port.port_no). */
+    struct hmap_node ifindex_node; /* By (dpif_class, ifindex). */
+    struct netdev *netdev;
+    struct dpif_port dpif_port;
+    const struct dpif_class *dpif_class;
+    int ifindex;
+};
+
+static uint32_t
+netdev_ports_hash(odp_port_t port, const struct dpif_class *dpif_class)
+{
+    return hash_int(odp_to_u32(port), hash_pointer(dpif_class, 0));
+}
+
+static struct port_to_netdev_data *
+netdev_ports_lookup(odp_port_t port_no, const struct dpif_class *dpif_class)
+    OVS_REQUIRES(netdev_hmap_mutex)
+{
+    struct port_to_netdev_data *data;
+
+    HMAP_FOR_EACH_WITH_HASH (data, portno_node,
+                             netdev_ports_hash(port_no, dpif_class),
+                             &port_to_netdev) {
+        if (data->dpif_class == dpif_class
+            && data->dpif_port.port_no == port_no) {
+            return data;
+        }
+    }
+    return NULL;
+}
+
+int
+netdev_ports_insert(struct netdev *netdev, const struct dpif_class *dpif_class,
+                    struct dpif_port *dpif_port)
+{
+    struct port_to_netdev_data *data;
+    int ifindex = netdev_get_ifindex(netdev);
+
+    if (ifindex < 0) {
+        return ENODEV;
+    }
+
+    ovs_mutex_lock(&netdev_hmap_mutex);
+    if (netdev_ports_lookup(dpif_port->port_no, dpif_class)) {
+        ovs_mutex_unlock(&netdev_hmap_mutex);
+        return EEXIST;
+    }
+
+    data = xzalloc(sizeof *data);
+    data->netdev = netdev_ref(netdev);
+    data->dpif_class = dpif_class;
+    dpif_port_clone(&data->dpif_port, dpif_port);
+    data->ifindex = ifindex;
+
+    hmap_insert(&port_to_netdev, &data->portno_node,
+                netdev_ports_hash(dpif_port->port_no, dpif_class));
+    hmap_insert(&ifindex_to_port, &data->ifindex_node, ifindex);
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+
+    netdev_init_flow_api(netdev);
+
+    return 0;
+}
+
+struct netdev *
+netdev_ports_get(odp_port_t port_no, const struct dpif_class *dpif_class)
+{
+    struct port_to_netdev_data *data;
+    struct netdev *ret = NULL;
+
+    ovs_mutex_lock(&netdev_hmap_mutex);
+    data = netdev_ports_lookup(port_no, dpif_class);
+    if (data) {
+        ret = netdev_ref(data->netdev);
+    }
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+
+    return ret;
+}
+
+int
+netdev_ports_remove(odp_port_t port_no, const struct dpif_class *dpif_class)
+{
+    struct port_to_netdev_data *data;
+    int ret = ENOENT;
+
+    ovs_mutex_lock(&netdev_hmap_mutex);
+
+    data = netdev_ports_lookup(port_no, dpif_class);
+    if (data) {
+        dpif_port_destroy(&data->dpif_port);
+        netdev_close(data->netdev); /* unref and possibly close */
+        hmap_remove(&port_to_netdev, &data->portno_node);
+        hmap_remove(&ifindex_to_port, &data->ifindex_node);
+        free(data);
+        ret = 0;
+    }
+
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+
+    return ret;
+}
+
+odp_port_t
+netdev_ifindex_to_odp_port(int ifindex)
+{
+    struct port_to_netdev_data *data;
+    odp_port_t ret = 0;
+
+    ovs_mutex_lock(&netdev_hmap_mutex);
+    HMAP_FOR_EACH_WITH_HASH (data, ifindex_node, ifindex, &ifindex_to_port) {
+        if (data->ifindex == ifindex) {
+            ret = data->dpif_port.port_no;
+            break;
+        }
+    }
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+
+    return ret;
+}
+
+void
+netdev_ports_flow_flush(const struct dpif_class *dpif_class)
+{
+    struct port_to_netdev_data *data;
+
+    ovs_mutex_lock(&netdev_hmap_mutex);
+    HMAP_FOR_EACH (data, portno_node, &port_to_netdev) {
+        if (data->dpif_class == dpif_class) {
+            netdev_flow_flush(data->netdev);
+        }
+    }
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+}
+
+struct netdev_flow_dump **
+netdev_ports_flow_dump_create(const struct dpif_class *dpif_class, int *ports)
+{
+    struct port_to_netdev_data *data;
+    struct netdev_flow_dump **dumps;
+    int count = 0;
+    int i = 0;
+
+    ovs_mutex_lock(&netdev_hmap_mutex);
+    HMAP_FOR_EACH (data, portno_node, &port_to_netdev) {
+        if (data->dpif_class == dpif_class) {
+            count++;
+        }
+    }
+
+    dumps = count ? xzalloc(sizeof *dumps * count) : NULL;
+
+    HMAP_FOR_EACH (data, portno_node, &port_to_netdev) {
+        if (data->dpif_class == dpif_class) {
+            if (netdev_flow_dump_create(data->netdev, &dumps[i])) {
+                continue;
+            }
+
+            dumps[i]->port = data->dpif_port.port_no;
+            i++;
+        }
+    }
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+
+    *ports = i;
+    return dumps;
+}
+
+int
+netdev_ports_flow_del(const struct dpif_class *dpif_class,
+                      const ovs_u128 *ufid,
+                      struct dpif_flow_stats *stats)
+{
+    struct port_to_netdev_data *data;
+
+    ovs_mutex_lock(&netdev_hmap_mutex);
+    HMAP_FOR_EACH (data, portno_node, &port_to_netdev) {
+        if (data->dpif_class == dpif_class
+            && !netdev_flow_del(data->netdev, ufid, stats)) {
+            ovs_mutex_unlock(&netdev_hmap_mutex);
+            return 0;
+        }
+    }
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+
+    return ENOENT;
+}
+
+int
+netdev_ports_flow_get(const struct dpif_class *dpif_class, struct match *match,
+                      struct nlattr **actions, const ovs_u128 *ufid,
+                      struct dpif_flow_stats *stats,
+                      struct dpif_flow_attrs *attrs, struct ofpbuf *buf)
+{
+    struct port_to_netdev_data *data;
+
+    ovs_mutex_lock(&netdev_hmap_mutex);
+    HMAP_FOR_EACH (data, portno_node, &port_to_netdev) {
+        if (data->dpif_class == dpif_class
+            && !netdev_flow_get(data->netdev, match, actions,
+                                ufid, stats, attrs, buf)) {
+            ovs_mutex_unlock(&netdev_hmap_mutex);
+            return 0;
+        }
+    }
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+    return ENOENT;
+}
+
+void
+netdev_free_custom_stats_counters(struct netdev_custom_stats *custom_stats)
+{
+    if (custom_stats) {
+        if (custom_stats->counters) {
+            free(custom_stats->counters);
+            custom_stats->counters = NULL;
+            custom_stats->size = 0;
+        }
+    }
+}
+
+#ifdef __linux__
+static void
+netdev_ports_flow_init(void)
+{
+    struct port_to_netdev_data *data;
+
+    ovs_mutex_lock(&netdev_hmap_mutex);
+    HMAP_FOR_EACH (data, portno_node, &port_to_netdev) {
+       netdev_init_flow_api(data->netdev);
+    }
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+}
+
+void
+netdev_set_flow_api_enabled(const struct smap *ovs_other_config)
+{
+    if (smap_get_bool(ovs_other_config, "hw-offload", false)) {
+        static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
+
+        if (ovsthread_once_start(&once)) {
+            netdev_flow_api_enabled = true;
+
+            VLOG_INFO("netdev: Flow API Enabled");
+
+            tc_set_policy(smap_get_def(ovs_other_config, "tc-policy",
+                                       TC_POLICY_DEFAULT));
+
+            netdev_ports_flow_init();
+
+            ovsthread_once_done(&once);
+        }
+    }
+}
+#else
+void
+netdev_set_flow_api_enabled(const struct smap *ovs_other_config OVS_UNUSED)
+{
+}
+#endif

@@ -58,10 +58,14 @@ vSwitch? Start here.
   :doc:`intro/install/netbsd` |
   :doc:`intro/install/windows` |
   :doc:`intro/install/xenserver` |
-  :doc:`intro/install/dpdk`
+  :doc:`intro/install/dpdk` |
+  :doc:`Installation FAQs <faq/releases>`
 
-- **Tutorials:** :doc:`tutorials/ovs-advanced` |
-  :doc:`tutorials/ovn-sandbox`
+- **Tutorials:** :doc:`tutorials/faucet` |
+  :doc:`tutorials/ovs-advanced` |
+  :doc:`tutorials/ovn-sandbox` |
+  :doc:`tutorials/ovn-openstack` |
+  :doc:`tutorials/ovs-conntrack`
 
 Deeper Dive
 -----------
@@ -103,12 +107,15 @@ Learn more about the Open vSwitch project and about how you can contribute:
   :doc:`internals/contributing/coding-style` |
   :doc:`internals/contributing/coding-style-windows`
 
-- **Maintaining:** :doc:`internals/maintainers` |
+- **Maintaining:** :doc:`internals/charter` |
+  :doc:`internals/maintainers` |
   :doc:`internals/committer-responsibilities` |
-  :doc:`internals/committer-grant-revocation`
+  :doc:`internals/committer-grant-revocation` |
+  :doc:`internals/committer-emeritus-status`
 
 - **Documentation:** :doc:`internals/contributing/documentation-style` |
-  :doc:`Building Open vSwitch Documentation <intro/install/documentation>`
+  :doc:`Building Open vSwitch Documentation <intro/install/documentation>` |
+  :doc:`internals/documentation`
 
 Getting Help
 -------------

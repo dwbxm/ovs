@@ -31,9 +31,11 @@
 #include <linux/jiffies.h>
 #include <linux/time.h>
 #include <linux/flex_array.h>
+#include <linux/cpumask.h>
 #include <net/inet_ecn.h>
 #include <net/ip_tunnels.h>
 #include <net/dst_metadata.h>
+#include <net/nsh.h>
 
 struct sk_buff;
 
@@ -65,6 +67,11 @@ struct vlan_head {
 	(offsetof(struct sw_flow_key, recirc_id) +	\
 	FIELD_SIZEOF(struct sw_flow_key, recirc_id))
 
+struct ovs_key_nsh {
+	struct ovs_nsh_key_base base;
+	__be32 context[NSH_MD1_CONTEXT_SIZE];
+};
+
 struct sw_flow_key {
 	u8 tun_opts[255];
 	u8 tun_opts_len;
@@ -85,6 +92,11 @@ struct sw_flow_key {
 		struct vlan_head cvlan;
 		__be16 type;		/* Ethernet frame type. */
 	} eth;
+	/* Filling a hole of two bytes. */
+	u8 ct_state;
+	u8 ct_orig_proto;		/* CT original direction tuple IP
+					 * protocol.
+					 */
 	union {
 		struct {
 			__be32 top_lse;	/* top label stack entry */
@@ -96,6 +108,7 @@ struct sw_flow_key {
 			u8     frag;	/* One of OVS_FRAG_TYPE_*. */
 		} ip;
 	};
+	u16 ct_zone;			/* Conntrack zone. */
 	struct {
 		__be16 src;		/* TCP/UDP/SCTP source port. */
 		__be16 dst;		/* TCP/UDP/SCTP destination port. */
@@ -136,18 +149,15 @@ struct sw_flow_key {
 				} nd;
 			};
 		} ipv6;
+		struct ovs_key_nsh nsh;         /* network service header */
 	};
 	struct {
-		/* Connection tracking fields. */
-		u8 state;
-		u8 orig_proto;		/* CT orig tuple IP protocol. */
-		u16 zone;
-		u32 mark;
+		/* Connection tracking fields not packed above. */
 		struct {
 			__be16 src;	/* CT orig tuple tp src port. */
 			__be16 dst;	/* CT orig tuple tp dst port. */
 		} orig_tp;
-
+		u32 mark;
 		struct ovs_key_ct_labels labels;
 	} ct;
 
@@ -216,6 +226,7 @@ struct sw_flow {
 					 */
 	struct sw_flow_key key;
 	struct sw_flow_id id;
+	struct cpumask cpu_used_mask;
 	struct sw_flow_mask *mask;
 	struct sw_flow_actions __rcu *sf_acts;
 	struct flow_stats __rcu *stats[]; /* One for each CPU.  First one

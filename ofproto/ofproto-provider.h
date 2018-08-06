@@ -42,8 +42,13 @@
 #include "ofproto/ofproto.h"
 #include "openvswitch/list.h"
 #include "openvswitch/ofp-actions.h"
-#include "openvswitch/ofp-util.h"
 #include "openvswitch/ofp-errors.h"
+#include "openvswitch/ofp-flow.h"
+#include "openvswitch/ofp-group.h"
+#include "openvswitch/ofp-meter.h"
+#include "openvswitch/ofp-port.h"
+#include "openvswitch/ofp-switch.h"
+#include "openvswitch/ofp-table.h"
 #include "ovs-atomic.h"
 #include "ovs-rcu.h"
 #include "ovs-thread.h"
@@ -56,6 +61,7 @@
 
 struct match;
 struct ofputil_flow_mod;
+struct ofputil_packet_in_private;
 struct bfd_cfg;
 struct meter;
 struct ofoperation;
@@ -109,12 +115,13 @@ struct ofproto {
     /* List of expirable flows, in all flow tables. */
     struct ovs_list expirable OVS_GUARDED_BY(ofproto_mutex);
 
-    /* Meter table.
-     * OpenFlow meters start at 1.  To avoid confusion we leave the first
-     * pointer in the array un-used, and index directly with the OpenFlow
-     * meter_id. */
+    /* Meter table.  */
     struct ofputil_meter_features meter_features;
-    struct meter **meters; /* 'meter_features.max_meter' + 1 pointers. */
+    struct hmap meters;             /* uint32_t indexed 'struct meter *'.  */
+    uint32_t slowpath_meter_id;     /* Datapath slowpath meter.  UINT32_MAX
+                                       if not defined.  */
+    uint32_t controller_meter_id;   /* Datapath controller meter. UINT32_MAX
+                                       if not defined.  */
 
     /* OpenFlow connections. */
     struct connmgr *connmgr;
@@ -565,7 +572,7 @@ struct ofgroup {
     const struct ovs_list buckets;    /* Contains "struct ofputil_bucket"s. */
     const uint32_t n_buckets;
 
-    const struct ofputil_group_props props;
+    struct ofputil_group_props props;
 
     struct rule_collection rules OVS_GUARDED;   /* Referring rules. */
 };
@@ -828,7 +835,7 @@ struct ofproto_class {
      */
     struct ofproto *(*alloc)(void);
     int (*construct)(struct ofproto *ofproto);
-    void (*destruct)(struct ofproto *ofproto);
+    void (*destruct)(struct ofproto *ofproto, bool del);
     void (*dealloc)(struct ofproto *ofproto);
 
     /* Performs any periodic activity required by 'ofproto'.  It should:
@@ -1192,7 +1199,7 @@ struct ofproto_class {
      *
      * If this function is NULL then table 0 is always chosen. */
     enum ofperr (*rule_choose_table)(const struct ofproto *ofproto,
-                                     const struct match *match,
+                                     const struct minimatch *match,
                                      uint8_t *table_idp);
 
     /* Life-cycle functions for a "struct rule".
@@ -1873,7 +1880,10 @@ struct rule_criteria {
 /* flow_mod with execution context. */
 struct ofproto_flow_mod {
     /* Allocated by 'init' phase, may be freed after 'start' phase, as these
-     * are not needed for 'revert' nor 'finish'. */
+     * are not needed for 'revert' nor 'finish'.
+     *
+     * This structure owns a reference to 'temp_rule' (if it is nonnull) that
+     * must be eventually be released with ofproto_rule_unref().  */
     struct rule *temp_rule;
     struct rule_criteria criteria;
     struct cls_conjunction *conjs;
@@ -1934,7 +1944,8 @@ enum ofperr ofproto_flow_mod_init_for_learn(struct ofproto *,
                                             const struct ofputil_flow_mod *,
                                             struct ofproto_flow_mod *)
     OVS_EXCLUDED(ofproto_mutex);
-enum ofperr ofproto_flow_mod_learn(struct ofproto_flow_mod *, bool keep_ref)
+enum ofperr ofproto_flow_mod_learn(struct ofproto_flow_mod *, bool keep_ref,
+                                   unsigned limit, bool *below_limit)
     OVS_EXCLUDED(ofproto_mutex);
 enum ofperr ofproto_flow_mod_learn_refresh(struct ofproto_flow_mod *ofm);
 enum ofperr ofproto_flow_mod_learn_start(struct ofproto_flow_mod *ofm)

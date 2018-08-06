@@ -36,7 +36,6 @@
 #include "command-line.h"
 #include "fatal-signal.h"
 #include "flow.h"
-#include "openvswitch/ofp-util.h"
 #include "ovstest.h"
 #include "ovs-atomic.h"
 #include "ovs-thread.h"
@@ -58,7 +57,7 @@ static bool versioned = false;
     CLS_FIELD(nw_src,            NW_SRC)      \
     CLS_FIELD(nw_dst,            NW_DST)      \
     CLS_FIELD(in_port.ofp_port,  IN_PORT)     \
-    CLS_FIELD(vlan_tci,          VLAN_TCI)    \
+    CLS_FIELD(vlans[0].tci,      VLAN_TCI)    \
     CLS_FIELD(dl_type,           DL_TYPE)     \
     CLS_FIELD(tp_src,            TP_SRC)      \
     CLS_FIELD(tp_dst,            TP_DST)      \
@@ -231,8 +230,8 @@ match(const struct cls_rule *wild_, const struct flow *fixed)
             eq = eth_addr_equal_except(fixed->dl_dst, wild.flow.dl_dst,
                                        wild.wc.masks.dl_dst);
         } else if (f_idx == CLS_F_IDX_VLAN_TCI) {
-            eq = !((fixed->vlan_tci ^ wild.flow.vlan_tci)
-                   & wild.wc.masks.vlan_tci);
+            eq = !((fixed->vlans[0].tci ^ wild.flow.vlans[0].tci)
+                   & wild.wc.masks.vlans[0].tci);
         } else if (f_idx == CLS_F_IDX_TUN_ID) {
             eq = !((fixed->tunnel.tun_id ^ wild.flow.tunnel.tun_id)
                    & wild.wc.masks.tunnel.tun_id);
@@ -316,11 +315,13 @@ static ovs_be16 tp_src_values[] = { CONSTANT_HTONS(49362),
                                     CONSTANT_HTONS(80) };
 static ovs_be16 tp_dst_values[] = { CONSTANT_HTONS(6667), CONSTANT_HTONS(22) };
 static struct eth_addr dl_src_values[] = {
-    { { { 0x00, 0x02, 0xe3, 0x0f, 0x80, 0xa4 } } },
-    { { { 0x5e, 0x33, 0x7f, 0x5f, 0x1e, 0x99 } } } };
+    ETH_ADDR_C(00,02,e3,0f,80,a4),
+    ETH_ADDR_C(5e,33,7f,5f,1e,99)
+};
 static struct eth_addr dl_dst_values[] = {
-    { { { 0x4a, 0x27, 0x71, 0xae, 0x64, 0xc1 } } },
-    { { { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } } } };
+    ETH_ADDR_C(4a,27,71,ae,64,c1),
+    ETH_ADDR_C(ff,ff,ff,ff,ff,ff)
+};
 static uint8_t nw_proto_values[] = { IPPROTO_TCP, IPPROTO_ICMP };
 static uint8_t nw_dscp_values[] = { 48, 0 };
 
@@ -427,7 +428,7 @@ compare_classifiers(struct classifier *cls, size_t n_invisible_rules,
         flow.metadata = metadata_values[get_value(&x, N_METADATA_VALUES)];
         flow.in_port.ofp_port = in_port_values[get_value(&x,
                                                    N_IN_PORT_VALUES)];
-        flow.vlan_tci = vlan_tci_values[get_value(&x, N_VLAN_TCI_VALUES)];
+        flow.vlans[0].tci = vlan_tci_values[get_value(&x, N_VLAN_TCI_VALUES)];
         flow.dl_type = dl_type_values[get_value(&x, N_DL_TYPE_VALUES)];
         flow.tp_src = tp_src_values[get_value(&x, N_TP_SRC_VALUES)];
         flow.tp_dst = tp_dst_values[get_value(&x, N_TP_DST_VALUES)];
@@ -464,9 +465,8 @@ destroy_classifier(struct classifier *cls)
 
     classifier_defer(cls);
     CLS_FOR_EACH (rule, cls_rule, cls) {
-        if (classifier_remove(cls, &rule->cls_rule)) {
-            ovsrcu_postpone(free_rule, rule);
-        }
+        classifier_remove_assert(cls, &rule->cls_rule);
+        ovsrcu_postpone(free_rule, rule);
     }
     classifier_destroy(cls);
 }
@@ -688,7 +688,7 @@ make_rule(int wc_fields, int priority, int value_pat)
         } else if (f_idx == CLS_F_IDX_DL_DST) {
             WC_MASK_FIELD(&match.wc, dl_dst);
         } else if (f_idx == CLS_F_IDX_VLAN_TCI) {
-            match.wc.masks.vlan_tci = OVS_BE16_MAX;
+            match.wc.masks.vlans[0].tci = OVS_BE16_MAX;
         } else if (f_idx == CLS_F_IDX_TUN_ID) {
             match.wc.masks.tunnel.tun_id = OVS_BE64_MAX;
         } else if (f_idx == CLS_F_IDX_METADATA) {
@@ -814,7 +814,7 @@ test_single_rule(struct ovs_cmdl_context *ctx OVS_UNUSED)
         compare_classifiers(&cls, 0, OVS_VERSION_MIN, &tcls);
         check_tables(&cls, 1, 1, 0, 0, OVS_VERSION_MIN);
 
-        classifier_remove(&cls, &rule->cls_rule);
+        classifier_remove_assert(&cls, &rule->cls_rule);
         tcls_remove(&tcls, tcls_rule);
         assert(classifier_is_empty(&cls));
         assert(tcls_is_empty(&tcls));
@@ -862,7 +862,7 @@ test_rule_replacement(struct ovs_cmdl_context *ctx OVS_UNUSED)
         compare_classifiers(&cls, 0, OVS_VERSION_MIN, &tcls);
         check_tables(&cls, 1, 1, 0, 0, OVS_VERSION_MIN);
         classifier_defer(&cls);
-        classifier_remove(&cls, &rule2->cls_rule);
+        classifier_remove_assert(&cls, &rule2->cls_rule);
 
         tcls_destroy(&tcls);
         destroy_classifier(&cls);
@@ -1016,7 +1016,7 @@ test_many_rules_in_one_list (struct ovs_cmdl_context *ctx OVS_UNUSED)
                         n_invisible_rules++;
                         removable_rule = &rules[j]->cls_rule;
                     } else {
-                        classifier_remove(&cls, &rules[j]->cls_rule);
+                        classifier_remove_assert(&cls, &rules[j]->cls_rule);
                     }
                     tcls_remove(&tcls, tcls_rules[j]);
                     tcls_rules[j] = NULL;
@@ -1037,7 +1037,7 @@ test_many_rules_in_one_list (struct ovs_cmdl_context *ctx OVS_UNUSED)
                     /* Removable rule is no longer visible. */
                     assert(cls_match);
                     assert(!cls_match_visible_in_version(cls_match, version));
-                    classifier_remove(&cls, removable_rule);
+                    classifier_remove_assert(&cls, removable_rule);
                     n_invisible_rules--;
                 }
             }
@@ -1137,7 +1137,7 @@ test_many_rules_in_one_table(struct ovs_cmdl_context *ctx OVS_UNUSED)
                                                    version);
                 n_invisible_rules++;
             } else {
-                classifier_remove(&cls, &rules[i]->cls_rule);
+                classifier_remove_assert(&cls, &rules[i]->cls_rule);
             }
             compare_classifiers(&cls, n_invisible_rules, version, &tcls);
             check_tables(&cls, i < N_RULES - 1, N_RULES - (i + 1), 0,
@@ -1149,7 +1149,7 @@ test_many_rules_in_one_table(struct ovs_cmdl_context *ctx OVS_UNUSED)
 
         if (versioned) {
             for (i = 0; i < N_RULES; i++) {
-                classifier_remove(&cls, &rules[i]->cls_rule);
+                classifier_remove_assert(&cls, &rules[i]->cls_rule);
                 n_invisible_rules--;
 
                 compare_classifiers(&cls, n_invisible_rules, version, &tcls);
@@ -1248,7 +1248,7 @@ test_many_rules_in_n_tables(int n_tables)
 
             /* Remove rules that are no longer visible. */
             LIST_FOR_EACH_POP (rule, list_node, &list) {
-                classifier_remove(&cls, &rule->cls_rule);
+                classifier_remove_assert(&cls, &rule->cls_rule);
                 n_invisible_rules--;
 
                 compare_classifiers(&cls, n_invisible_rules, version,
@@ -1431,7 +1431,7 @@ benchmark(bool use_wc)
         flow->metadata = metadata_values[get_value(&x, N_METADATA_VALUES)];
         flow->in_port.ofp_port = in_port_values[get_value(&x,
                                                           N_IN_PORT_VALUES)];
-        flow->vlan_tci = vlan_tci_values[get_value(&x, N_VLAN_TCI_VALUES)];
+        flow->vlans[0].tci = vlan_tci_values[get_value(&x, N_VLAN_TCI_VALUES)];
         flow->dl_type = dl_type_values[get_value(&x, N_DL_TYPE_VALUES)];
         flow->tp_src = tp_src_values[get_value(&x, N_TP_SRC_VALUES)];
         flow->tp_dst = tp_dst_values[get_value(&x, N_TP_DST_VALUES)];
@@ -1495,11 +1495,11 @@ benchmark(bool use_wc)
 static uint32_t
 random_value(void)
 {
-    static const uint32_t values[] =
+    static const uint32_t values_[] =
         { 0xffffffff, 0xaaaaaaaa, 0x55555555, 0x80000000,
           0x00000001, 0xface0000, 0x00d00d1e, 0xdeadbeef };
 
-    return values[random_range(ARRAY_SIZE(values))];
+    return values_[random_range(ARRAY_SIZE(values_))];
 }
 
 static bool
@@ -1537,7 +1537,6 @@ static bool
 next_random_flow(struct flow *flow, unsigned int idx)
 {
     uint32_t *flow_u32 = (uint32_t *) flow;
-    int i;
 
     memset(flow, 0, sizeof *flow);
 
@@ -1547,14 +1546,14 @@ next_random_flow(struct flow *flow, unsigned int idx)
     }
 
     /* All flows with a small number of consecutive nonzero values. */
-    for (i = 1; i <= 4; i++) {
+    for (int i = 1; i <= 4; i++) {
         if (init_consecutive_values(i, flow, &idx)) {
             return true;
         }
     }
 
     /* All flows with a large number of consecutive nonzero values. */
-    for (i = FLOW_U32S - 4; i <= FLOW_U32S; i++) {
+    for (int i = FLOW_U32S - 4; i <= FLOW_U32S; i++) {
         if (init_consecutive_values(i, flow, &idx)) {
             return true;
         }
@@ -1581,9 +1580,8 @@ next_random_flow(struct flow *flow, unsigned int idx)
     /* 16 randomly chosen flows with N >= 3 nonzero values. */
     if (choose(16 * (FLOW_U32S - 4), &idx)) {
         int n = idx / 16 + 3;
-        int i;
 
-        for (i = 0; i < n; i++) {
+        for (int i = 0; i < n; i++) {
             flow_u32[i] = random_value();
         }
         shuffle_u32s(flow_u32, FLOW_U32S);
@@ -1702,7 +1700,10 @@ test_miniflow(struct ovs_cmdl_context *ctx OVS_UNUSED)
         miniflow = miniflow_create(&flow);
 
         /* Check that the flow equals its miniflow. */
-        assert(miniflow_get_vid(miniflow) == vlan_tci_to_vid(flow.vlan_tci));
+        for (i = 0; i < FLOW_MAX_VLAN_HEADERS; i++) {
+            assert(miniflow_get_vid(miniflow, i) ==
+                   vlan_tci_to_vid(flow.vlans[i].tci));
+        }
         for (i = 0; i < FLOW_U64S; i++) {
             assert(miniflow_get(miniflow, i) == flow_u64[i]);
         }

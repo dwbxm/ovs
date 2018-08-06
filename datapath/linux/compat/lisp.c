@@ -546,7 +546,12 @@ static const struct net_device_ops lisp_netdev_ops = {
 	.ndo_open               = lisp_open,
 	.ndo_stop               = lisp_stop,
 	.ndo_start_xmit         = lisp_dev_xmit,
+#ifdef  HAVE_RHEL7_MAX_MTU
+	.ndo_size		= sizeof(struct net_device_ops),
+	.extended.ndo_change_mtu = lisp_change_mtu,
+#else
 	.ndo_change_mtu         = lisp_change_mtu,
+#endif
 	.ndo_validate_addr      = eth_validate_addr,
 	.ndo_set_mac_address    = eth_mac_addr,
 #ifdef USE_UPSTREAM_TUNNEL
@@ -580,7 +585,11 @@ static void lisp_setup(struct net_device *dev)
 
 	dev->netdev_ops = &lisp_netdev_ops;
 	dev->ethtool_ops = &lisp_ethtool_ops;
+#ifndef HAVE_NEEDS_FREE_NETDEV
 	dev->destructor = free_netdev;
+#else
+	dev->needs_free_netdev = true;
+#endif
 
 	SET_NETDEV_DEVTYPE(dev, &lisp_type);
 
@@ -589,10 +598,8 @@ static void lisp_setup(struct net_device *dev)
 	dev->features    |= NETIF_F_RXCSUM;
 	dev->features    |= NETIF_F_GSO_SOFTWARE;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)
 	dev->hw_features |= NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_RXCSUM;
 	dev->hw_features |= NETIF_F_GSO_SOFTWARE;
-#endif
 #ifdef USE_UPSTREAM_TUNNEL
 	netif_keep_dst(dev);
 #endif
@@ -604,7 +611,12 @@ static const struct nla_policy lisp_policy[IFLA_LISP_MAX + 1] = {
 	[IFLA_LISP_PORT]              = { .type = NLA_U16 },
 };
 
+#ifdef HAVE_EXT_ACK_IN_RTNL_LINKOPS
+static int lisp_validate(struct nlattr *tb[], struct nlattr *data[],
+			 struct netlink_ext_ack __always_unused *extack)
+#else
 static int lisp_validate(struct nlattr *tb[], struct nlattr *data[])
+#endif
 {
 	if (tb[IFLA_ADDRESS]) {
 		if (nla_len(tb[IFLA_ADDRESS]) != ETH_ALEN)
@@ -656,17 +668,15 @@ static int lisp_configure(struct net *net, struct net_device *dev,
 	return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)
+#ifdef HAVE_EXT_ACK_IN_RTNL_LINKOPS
+static int lisp_newlink(struct net *net, struct net_device *dev,
+		struct nlattr *tb[], struct nlattr *data[],
+		struct netlink_ext_ack __always_unused *extack)
+#else
 static int lisp_newlink(struct net *net, struct net_device *dev,
 		struct nlattr *tb[], struct nlattr *data[])
-{
-#else
-static int lisp_newlink(struct net_device *dev,
-		struct nlattr *tb[], struct nlattr *data[])
-
-{
-	struct net *net = &init_net;
 #endif
+{
 	__be16 dst_port = htons(LISP_UDP_PORT);
 
 	if (data[IFLA_LISP_PORT])
@@ -675,11 +685,7 @@ static int lisp_newlink(struct net_device *dev,
 	return lisp_configure(net, dev, dst_port);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)
 static void lisp_dellink(struct net_device *dev, struct list_head *head)
-#else
-static void lisp_dellink(struct net_device *dev)
-#endif
 {
 	struct lisp_dev *lisp = netdev_priv(dev);
 

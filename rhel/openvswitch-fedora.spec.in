@@ -75,6 +75,7 @@ BuildRequires: python3-devel
 BuildRequires: desktop-file-utils
 BuildRequires: groff graphviz
 BuildRequires: checkpolicy, selinux-policy-devel
+BuildRequires: %{_py2}-sphinx
 # make check dependencies
 BuildRequires: %{_py2}-twisted%{?rhel:-core} %{_py2}-zope-interface %{_py2}-six
 BuildRequires: procps-ng
@@ -83,14 +84,17 @@ BuildRequires: libcap-ng libcap-ng-devel
 %endif
 %if %{with dpdk}
 BuildRequires: libpcap-devel numactl-devel
-BuildRequires: dpdk-devel >= 16.11
+BuildRequires: dpdk-devel >= 17.05.1
 Provides: %{name}-dpdk = %{version}-%{release}
 %endif
+BuildRequires: unbound unbound-devel
 
-Requires: openssl hostname iproute module-init-tools
+Requires: openssl hostname iproute module-init-tools unbound
 #Upstream kernel commit 4f647e0a3c37b8d5086214128614a136064110c3
 #Requires: kernel >= 3.15.0-0
 
+Requires(pre): shadow-utils
+Requires(post): /bin/sed
 Requires(post): systemd-units
 Requires(preun): systemd-units
 Requires(postun): systemd-units
@@ -142,7 +146,7 @@ Summary: Open vSwitch testing utilities
 License: ASL 2.0
 BuildArch: noarch
 Requires: %{_py2}-openvswitch = %{version}-%{release}
-Requires: %{_py2} %{_py2}-twisted
+Requires: %{_py2} %{_py2}-netifaces %{_py2}-twisted
 
 %description test
 Utilities that are useful to diagnose performance and connectivity
@@ -211,37 +215,61 @@ Docker network plugins for OVN.
 %build
 %configure \
 %if %{with libcapng}
-	--enable-libcapng \
+        --enable-libcapng \
 %else
-	--disable-libcapng \
+        --disable-libcapng \
 %endif
 %if %{with dpdk}
-	--with-dpdk=$(dirname %{_datadir}/dpdk/*/.config) \
+        --with-dpdk=$(dirname %{_datadir}/dpdk/*/.config) \
 %endif
-	--enable-ssl \
-	--with-pkidir=%{_sharedstatedir}/openvswitch/pki
+        --enable-ssl \
+        --with-pkidir=%{_sharedstatedir}/openvswitch/pki \
+%if 0%{?fedora} > 22 || %{with build_python3}
+        PYTHON3=%{__python3} \
+        PYTHON=%{__python2}
+%else
+        PYTHON=%{__python}
+%endif
+
+build-aux/dpdkstrip.py \
+%if %{with dpdk}
+        --dpdk \
+%else
+        --nodpdk \
+%endif
+        < rhel/usr_lib_systemd_system_ovs-vswitchd.service.in \
+        > rhel/usr_lib_systemd_system_ovs-vswitchd.service
 
 make %{?_smp_mflags}
-cd selinux
-make -f %{_datadir}/selinux/devel/Makefile
+make selinux-policy
 
 %install
 rm -rf $RPM_BUILD_ROOT
 make install DESTDIR=$RPM_BUILD_ROOT
 
+install -d -m 0755 $RPM_BUILD_ROOT%{_rundir}/openvswitch
+install -d -m 0750 $RPM_BUILD_ROOT%{_localstatedir}/log/openvswitch
 install -d -m 0755 $RPM_BUILD_ROOT%{_sysconfdir}/openvswitch
+
+%if %{with dpdk}
+install -p -D -m 0644 rhel/usr_lib_udev_rules.d_91-vfio.rules \
+        $RPM_BUILD_ROOT%{_prefix}/lib/udev/rules.d/91-vfio.rules
+%endif
 
 install -p -D -m 0644 \
         rhel/usr_share_openvswitch_scripts_systemd_sysconfig.template \
         $RPM_BUILD_ROOT/%{_sysconfdir}/sysconfig/openvswitch
-for service in openvswitch ovsdb-server ovs-vswitchd \
-		ovn-controller ovn-controller-vtep ovn-northd; do
-	install -p -D -m 0644 \
-			rhel/usr_lib_systemd_system_${service}.service \
-			$RPM_BUILD_ROOT%{_unitdir}/${service}.service
+for service in openvswitch ovsdb-server ovs-vswitchd ovs-delete-transient-ports \
+                ovn-controller ovn-controller-vtep ovn-northd; do
+        install -p -D -m 0644 \
+                        rhel/usr_lib_systemd_system_${service}.service \
+                        $RPM_BUILD_ROOT%{_unitdir}/${service}.service
 done
 install -m 0755 rhel/etc_init.d_openvswitch \
         $RPM_BUILD_ROOT%{_datadir}/openvswitch/scripts/openvswitch.init
+
+install -p -D -m 0644 rhel/etc_openvswitch_default.conf \
+        $RPM_BUILD_ROOT/%{_sysconfdir}/openvswitch/default.conf
 
 install -p -D -m 0644 rhel/etc_logrotate.d_openvswitch \
         $RPM_BUILD_ROOT/%{_sysconfdir}/logrotate.d/openvswitch
@@ -270,16 +298,25 @@ rm -rf $RPM_BUILD_ROOT/%{_datadir}/openvswitch/python/
 install -d -m 0755 $RPM_BUILD_ROOT/%{_sharedstatedir}/openvswitch
 
 touch $RPM_BUILD_ROOT%{_sysconfdir}/openvswitch/conf.db
+touch $RPM_BUILD_ROOT%{_sysconfdir}/openvswitch/.conf.db.~lock~
 touch $RPM_BUILD_ROOT%{_sysconfdir}/openvswitch/system-id.conf
 
 install -p -m 644 -D selinux/openvswitch-custom.pp \
         $RPM_BUILD_ROOT%{_datadir}/selinux/packages/%{name}/openvswitch-custom.pp
 
 install -d $RPM_BUILD_ROOT%{_prefix}/lib/firewalld/services/
-install rhel/usr_lib_firewalld_services_ovn-central-firewall-service.xml \
+install -p -m 0644 rhel/usr_lib_firewalld_services_ovn-central-firewall-service.xml \
         $RPM_BUILD_ROOT%{_prefix}/lib/firewalld/services/ovn-central-firewall-service.xml
-install rhel/usr_lib_firewalld_services_ovn-host-firewall-service.xml \
+install -p -m 0644 rhel/usr_lib_firewalld_services_ovn-host-firewall-service.xml \
         $RPM_BUILD_ROOT%{_prefix}/lib/firewalld/services/ovn-host-firewall-service.xml
+
+install -d -m 0755 $RPM_BUILD_ROOT%{_prefix}/lib/ocf/resource.d/ovn
+ln -s %{_datadir}/openvswitch/scripts/ovndb-servers.ocf \
+      $RPM_BUILD_ROOT%{_prefix}/lib/ocf/resource.d/ovn/ovndb-servers
+
+install -p -D -m 0755 \
+        rhel/usr_share_openvswitch_scripts_ovs-systemd-reload \
+        $RPM_BUILD_ROOT%{_datadir}/openvswitch/scripts/ovs-systemd-reload
 
 # remove unpackaged files
 rm -f $RPM_BUILD_ROOT%{_bindir}/ovs-parse-backtrace \
@@ -304,6 +341,9 @@ rm -f $RPM_BUILD_ROOT%{_bindir}/ovs-parse-backtrace \
 
 %clean
 rm -rf $RPM_BUILD_ROOT
+
+%pre selinux-policy
+%selinux_relabel_pre -s targeted
 
 %preun
 %if 0%{?systemd_preun:1}
@@ -349,7 +389,32 @@ rm -rf $RPM_BUILD_ROOT
     fi
 %endif
 
+%pre
+getent group openvswitch >/dev/null || groupadd -r openvswitch
+getent passwd openvswitch >/dev/null || \
+    useradd -r -g openvswitch -d / -s /sbin/nologin \
+    -c "Open vSwitch Daemons" openvswitch
+
+%if %{with dpdk}
+    getent group hugetlbfs >/dev/null || groupadd hugetlbfs
+    usermod -a -G hugetlbfs openvswitch
+%endif
+exit 0
+
 %post
+if [ $1 -eq 1 ]; then
+    sed -i 's:^#OVS_USER_ID=:OVS_USER_ID=:' /etc/sysconfig/openvswitch
+
+%if %{with dpdk}
+    sed -i \
+        's@OVS_USER_ID="openvswitch:openvswitch"@OVS_USER_ID="openvswitch:hugetlbfs"@'\
+        /etc/sysconfig/openvswitch
+%endif
+
+    # In the case of upgrade, this is not needed.
+    chown -R openvswitch:openvswitch /etc/openvswitch
+fi
+
 %if 0%{?systemd_post:1}
     %systemd_post %{name}.service
 %else
@@ -358,10 +423,6 @@ rm -rf $RPM_BUILD_ROOT
         /bin/systemctl daemon-reload >dev/null || :
     fi
 %endif
-
-%post ovn-common
-mkdir -p /usr/lib/ocf/resource.d/ovn
-ln -sf %{_datadir}/openvswitch/scripts/ovndb-servers.ocf /usr/lib/ocf/resource.d/ovn/ovndb-servers
 
 %post ovn-central
 %if 0%{?systemd_post:1}
@@ -394,7 +455,7 @@ ln -sf %{_datadir}/openvswitch/scripts/ovndb-servers.ocf /usr/lib/ocf/resource.d
 %endif
 
 %post selinux-policy
-/usr/sbin/semodule -i %{_datadir}/selinux/packages/%{name}/openvswitch-custom.pp &> /dev/null || :
+%selinux_modules_install -s targeted %{_datadir}/selinux/packages/%{name}/openvswitch-custom.pp
 
 %postun
 %if 0%{?systemd_postun:1}
@@ -403,49 +464,34 @@ ln -sf %{_datadir}/openvswitch/scripts/ovndb-servers.ocf /usr/lib/ocf/resource.d
     /bin/systemctl daemon-reload >/dev/null 2>&1 || :
 %endif
 
-%postun ovn-common
-if [ $1 -eq 0 ] ; then
-    # Package removal, not upgrade
-    rm -rf /usr/lib/ocf/resource.d/ovn
-fi
-
 %postun ovn-central
-%if 0%{?systemd_postun_with_restart:1}
-    %systemd_postun_with_restart ovn-northd.service
+%if 0%{?systemd_postun:1}
+    %systemd_postun ovn-northd.service
 %else
     /bin/systemctl daemon-reload >/dev/null 2>&1 || :
-    if [ "$1" -ge "1" ] ; then
-    # Package upgrade, not uninstall
-        /bin/systemctl try-restart ovn-northd.service >/dev/null 2>&1 || :
-    fi
 %endif
 
 %postun ovn-host
-%if 0%{?systemd_postun_with_restart:1}
-    %systemd_postun_with_restart ovn-controller.service
+%if 0%{?systemd_postun:1}
+    %systemd_postun ovn-controller.service
 %else
     /bin/systemctl daemon-reload >/dev/null 2>&1 || :
-    if [ "$1" -ge "1" ] ; then
-        # Package upgrade, not uninstall
-        /bin/systemctl try-restart ovn-controller.service >/dev/null 2>&1 || :
-    fi
 %endif
 
 %postun ovn-vtep
-%if 0%{?systemd_postun_with_restart:1}
-    %systemd_postun_with_restart ovn-controller-vtep.service
+%if 0%{?systemd_postun:1}
+    %systemd_postun ovn-controller-vtep.service
 %else
     /bin/systemctl daemon-reload >/dev/null 2>&1 || :
-    if [ "$1" -ge "1" ] ; then
-        # Package upgrade, not uninstall
-        /bin/systemctl try-restart ovn-controller-vtep.service >/dev/null 2>&1 || :
-    fi
 %endif
 
 %postun selinux-policy
 if [ $1 -eq 0 ] ; then
-  /usr/sbin/semodule -r openvswitch-custom &> /dev/null || :
+  %selinux_modules_uninstall -s targeted openvswitch-custom
 fi
+
+%posttrans selinux-policy
+%selinux_relabel_post -s targeted
 
 %files selinux-policy
 %defattr(-,root,root)
@@ -453,12 +499,10 @@ fi
 
 %files -n %{_py2}-openvswitch
 %{python2_sitelib}/ovs
-%doc COPYING
 
 %if 0%{?fedora} > 22 || %{with build_python3}
 %files -n python3-openvswitch
 %{python3_sitelib}/ovs
-%doc COPYING
 %endif
 
 %files test
@@ -485,17 +529,21 @@ fi
 %{_includedir}/ovn/*
 
 %files
+%defattr(-,openvswitch,openvswitch)
+%dir %{_sysconfdir}/openvswitch
+%{_sysconfdir}/openvswitch/default.conf
+%config %ghost %{_sysconfdir}/openvswitch/conf.db
+%ghost %{_sysconfdir}/openvswitch/.conf.db.~lock~
+%config %ghost %{_sysconfdir}/openvswitch/system-id.conf
+%config(noreplace) %{_sysconfdir}/sysconfig/openvswitch
 %defattr(-,root,root)
 %{_sysconfdir}/bash_completion.d/ovs-appctl-bashcomp.bash
 %{_sysconfdir}/bash_completion.d/ovs-vsctl-bashcomp.bash
-%dir %{_sysconfdir}/openvswitch
-%config %ghost %{_sysconfdir}/openvswitch/conf.db
-%config %ghost %{_sysconfdir}/openvswitch/system-id.conf
-%config(noreplace) %{_sysconfdir}/sysconfig/openvswitch
 %config(noreplace) %{_sysconfdir}/logrotate.d/openvswitch
 %{_unitdir}/openvswitch.service
 %{_unitdir}/ovsdb-server.service
 %{_unitdir}/ovs-vswitchd.service
+%{_unitdir}/ovs-delete-transient-ports.service
 %{_datadir}/openvswitch/scripts/openvswitch.init
 %{_sysconfdir}/sysconfig/network-scripts/ifup-ovs
 %{_sysconfdir}/sysconfig/network-scripts/ifdown-ovs
@@ -506,6 +554,8 @@ fi
 %{_datadir}/openvswitch/scripts/ovs-save
 %{_datadir}/openvswitch/scripts/ovs-vtep
 %{_datadir}/openvswitch/scripts/ovs-ctl
+%{_datadir}/openvswitch/scripts/ovs-kmod-ctl
+%{_datadir}/openvswitch/scripts/ovs-systemd-reload
 %config %{_datadir}/openvswitch/vswitch.ovsschema
 %config %{_datadir}/openvswitch/vtep.ovsschema
 %{_bindir}/ovs-appctl
@@ -525,24 +575,32 @@ fi
 %{_mandir}/man1/ovsdb-client.1*
 %{_mandir}/man1/ovsdb-server.1*
 %{_mandir}/man1/ovsdb-tool.1*
+%{_mandir}/man5/ovsdb-server.5*
 %{_mandir}/man5/ovs-vswitchd.conf.db.5*
+%{_mandir}/man5/ovsdb.5*
 %{_mandir}/man5/vtep.5*
 %{_mandir}/man7/ovs-fields.7*
+%{_mandir}/man7/ovsdb.7*
+%{_mandir}/man7/ovsdb-server.7*
 %{_mandir}/man8/vtep-ctl.8*
 %{_mandir}/man8/ovs-appctl.8*
 %{_mandir}/man8/ovs-bugtool.8*
 %{_mandir}/man8/ovs-ctl.8*
 %{_mandir}/man8/ovs-dpctl.8*
 %{_mandir}/man8/ovs-dpctl-top.8*
+%{_mandir}/man8/ovs-kmod-ctl.8*
 %{_mandir}/man8/ovs-ofctl.8*
 %{_mandir}/man8/ovs-pki.8*
 %{_mandir}/man8/ovs-vsctl.8*
 %{_mandir}/man8/ovs-vswitchd.8*
 %{_mandir}/man8/ovs-parse-backtrace.8*
 %{_mandir}/man8/ovs-testcontroller.8*
-%doc COPYING NOTICE README.rst NEWS rhel/README.RHEL.rst
+%if %{with dpdk}
+%{_prefix}/lib/udev/rules.d/91-vfio.rules
+%endif
+%doc NOTICE README.rst NEWS rhel/README.RHEL.rst
 /var/lib/openvswitch
-/var/log/openvswitch
+%attr(750,openvswitch,openvswitch) /var/log/openvswitch
 %ghost %attr(755,root,root) %{_rundir}/openvswitch
 
 %files ovn-docker
@@ -553,6 +611,7 @@ fi
 %{_bindir}/ovn-nbctl
 %{_bindir}/ovn-sbctl
 %{_bindir}/ovn-trace
+%{_bindir}/ovn-detrace
 %{_datadir}/openvswitch/scripts/ovn-ctl
 %{_datadir}/openvswitch/scripts/ovndb-servers.ocf
 %{_datadir}/openvswitch/scripts/ovn-bugtool-nbctl-show
@@ -561,10 +620,12 @@ fi
 %{_mandir}/man8/ovn-ctl.8*
 %{_mandir}/man8/ovn-nbctl.8*
 %{_mandir}/man8/ovn-trace.8*
+%{_mandir}/man1/ovn-detrace.1*
 %{_mandir}/man7/ovn-architecture.7*
 %{_mandir}/man8/ovn-sbctl.8*
 %{_mandir}/man5/ovn-nb.5*
 %{_mandir}/man5/ovn-sb.5*
+%{_prefix}/lib/ocf/resource.d/ovn/ovndb-servers
 
 %files ovn-central
 %{_bindir}/ovn-northd

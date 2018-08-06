@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 Nicira, Inc.
+ * Copyright (c) 2015, 2017 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -84,12 +84,13 @@ ct_thread_main(void *aux_)
     struct dp_packet_batch *pkt_batch;
     ovs_be16 dl_type;
     size_t i;
+    long long now = time_msec();
 
     pkt_batch = prepare_packets(batch_size, change_conn, aux->tid, &dl_type);
     ovs_barrier_block(&barrier);
     for (i = 0; i < n_pkts; i += batch_size) {
         conntrack_execute(&ct, pkt_batch, dl_type, false, true, 0, NULL, NULL,
-                          NULL);
+                          0, 0, NULL, NULL, now);
     }
     ovs_barrier_block(&barrier);
     destroy_packets(pkt_batch);
@@ -149,18 +150,19 @@ test_benchmark(struct ovs_cmdl_context *ctx)
 }
 
 static void
-pcap_batch_execute_conntrack(struct conntrack *ct,
+pcap_batch_execute_conntrack(struct conntrack *ct_,
                              struct dp_packet_batch *pkt_batch)
 {
     struct dp_packet_batch new_batch;
     ovs_be16 dl_type = htons(0);
+    long long now = time_msec();
 
     dp_packet_batch_init(&new_batch);
 
     /* pkt_batch contains packets with different 'dl_type'. We have to
      * call conntrack_execute() on packets with the same 'dl_type'. */
     struct dp_packet *packet;
-    DP_PACKET_BATCH_FOR_EACH (packet, pkt_batch) {
+    DP_PACKET_BATCH_FOR_EACH (i, packet, pkt_batch) {
         struct flow flow;
 
         /* This also initializes the l3 and l4 pointers. */
@@ -171,15 +173,16 @@ pcap_batch_execute_conntrack(struct conntrack *ct,
         }
 
         if (flow.dl_type != dl_type) {
-            conntrack_execute(ct, &new_batch, dl_type, false, true, 0, NULL,
-                              NULL, NULL);
+            conntrack_execute(ct_, &new_batch, dl_type, false, true, 0,
+                              NULL, NULL, 0, 0, NULL, NULL, now);
             dp_packet_batch_init(&new_batch);
         }
         new_batch.packets[new_batch.count++] = packet;;
     }
 
     if (!dp_packet_batch_is_empty(&new_batch)) {
-        conntrack_execute(ct, &new_batch, dl_type, false, true, 0, NULL, NULL, NULL);
+        conntrack_execute(ct_, &new_batch, dl_type, false, true, 0, NULL, NULL,
+                          0, 0, NULL, NULL, now);
     }
 
 }
@@ -187,7 +190,7 @@ pcap_batch_execute_conntrack(struct conntrack *ct,
 static void
 test_pcap(struct ovs_cmdl_context *ctx)
 {
-    size_t total_count, batch_size;
+    size_t total_count, batch_size_;
     FILE *pcap;
     int err = 0;
 
@@ -196,10 +199,10 @@ test_pcap(struct ovs_cmdl_context *ctx)
         return;
     }
 
-    batch_size = 1;
+    batch_size_ = 1;
     if (ctx->argc > 2) {
-        batch_size = strtoul(ctx->argv[2], NULL, 0);
-        if (batch_size == 0 || batch_size > NETDEV_MAX_BURST) {
+        batch_size_ = strtoul(ctx->argv[2], NULL, 0);
+        if (batch_size_ == 0 || batch_size_ > NETDEV_MAX_BURST) {
             ovs_fatal(0,
                       "batch_size must be between 1 and NETDEV_MAX_BURST(%u)",
                       NETDEV_MAX_BURST);
@@ -210,20 +213,25 @@ test_pcap(struct ovs_cmdl_context *ctx)
 
     conntrack_init(&ct);
     total_count = 0;
-    while (!err) {
+    for (;;) {
         struct dp_packet *packet;
         struct dp_packet_batch pkt_batch_;
         struct dp_packet_batch *batch = &pkt_batch_;
 
         dp_packet_batch_init(batch);
-        err = ovs_pcap_read(pcap, &packet, NULL);
-        if (err) {
+        for (int i = 0; i < batch_size_; i++) {
+            err = ovs_pcap_read(pcap, &packet, NULL);
+            if (err) {
+                break;
+            }
+            dp_packet_batch_add(batch, packet);
+        }
+        if (!batch->count) {
             break;
         }
-        dp_packet_batch_add(batch, packet);
         pcap_batch_execute_conntrack(&ct, batch);
 
-        DP_PACKET_BATCH_FOR_EACH (packet, batch) {
+        DP_PACKET_BATCH_FOR_EACH (i, packet, batch) {
             struct ds ds = DS_EMPTY_INITIALIZER;
 
             total_count++;
@@ -237,6 +245,7 @@ test_pcap(struct ovs_cmdl_context *ctx)
         dp_packet_delete_batch(batch, true);
     }
     conntrack_destroy(&ct);
+    fclose(pcap);
 }
 
 static const struct ovs_cmdl_command commands[] = {
